@@ -21,7 +21,7 @@ from sklearn.isotonic import IsotonicRegression
 K_CAL = 1.35
 SPLIT = int(pd.Timestamp("2026-06-15").timestamp())
 REM_BUCKETS = [(0, 15), (15, 30), (30, 60), (60, 120), (120, 300),
-               (300, 600), (600, 900)]
+               (300, 600), (600, 900), (900, 1800), (1800, 3600)]
 
 
 def load_series():
@@ -73,6 +73,7 @@ def fit(save="data/gz_models.pkl"):
     S = pd.concat([
         make_samples(grid, rp, bn_adj, ev, gapmask, 900, 15, SPLIT),
         make_samples(grid, rp, bn_adj, ev, gapmask, 300, 5, SPLIT),
+        make_samples(grid, rp, bn_adj, ev, gapmask, 3600, 60, SPLIT),
     ], ignore_index=True)
     Ssym = pd.concat([S, S.assign(z=-S.z, y=1 - S.y)], ignore_index=True)
     models = {}
