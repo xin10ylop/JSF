@@ -71,7 +71,9 @@ def build(family: str):
         bmask = tbuy
         smask = ~tbuy
 
-        grid_off = np.arange(step, win, step, dtype="int64")
+        coarse = np.arange(step, max(win - 60, step), step, dtype="int64")
+        dense = np.arange(max(win - 60, step), win, 2, dtype="int64")
+        grid_off = np.unique(np.concatenate([coarse, dense]))
         gt = m.t0_us + grid_off * 1_000_000
 
         last_px, li = last_leq(tts, tpx, gt)

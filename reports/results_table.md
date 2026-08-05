@@ -18,3 +18,7 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | H4c | FLB favorite-space, 5m book grid | 995 mkts | 0.97-1.0: +1.02pp [0.08,1.62]; others mixed | WEAK POSITIVE |
 | H11 | Crossed books | 250 mkts book sample | median cross -1c, median crossable 24 sh, in 124/250 mkts | SCRAPS - not a strategy; likely reporting artifact |
 | U1 | Up-token mid-level bias in raw Up-space calibration | book grid | all-bucket negative gaps = BTC downtrend, NOT venue bias | CONFOUND IDENTIFIED - use favorite space |
+| S8 | Fat tails: standardized settle moves, train | 21K 15m + 63K 5m windows | kurt 11-13, MLE t-df ~5.2; P(z>3.09) = 10x Gaussian | MEASURED - Gaussian N(d2) structurally wrong in tails |
+| S9 | G(z) empirical pricing curve (isotonic, symmetrized, per rem bucket) | 800K train samples | final-30s: G(2)=0.909 vs Phi(2)=0.977 (7pp certainty haircut), shrinking with rem | MODEL BUILT |
+| S10 | Binance-adjusted spot vs oracle-known spot for settlement prediction | 700K samples | Brier gain concentrated in last 15s: 0.0563 vs 0.0628 (10% rel) | MEASURED - price off Binance |
+| H17a | Sniping EV upper bound (entry at oracle-fair, model space) | train windows | rem=5s, |dp|>0.05: 6% of windows, ~26c/sh before market reaction | UPPER BOUND - venue tape test pending |
