@@ -172,11 +172,13 @@ async def clob_stream():
                                 d = json.loads(msg)
                             except Exception:  # noqa: BLE001
                                 continue
-                            if isinstance(d, list):
-                                for ev in d:
-                                    w.write(ev)
-                            else:
-                                w.write(d)
+                            evs = d if isinstance(d, list) else [d]
+                            for ev in evs:
+                                if isinstance(ev, dict) and "bids" in ev:
+                                    ev = dict(ev)
+                                    ev["bids"] = ev["bids"][-3:]
+                                    ev["asks"] = ev["asks"][-3:]
+                                w.write(ev)
                         w.flush()
                     finally:
                         ptask.cancel()
