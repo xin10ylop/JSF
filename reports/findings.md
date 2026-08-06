@@ -1,98 +1,97 @@
 # Findings: Polymarket Short-Dated BTC Binaries
 
-Status: interim (train-period verdicts; test-period reveal pending final
-strategy freeze). Data: full trade tapes for five BTC families (Oct 2025 -
-Aug 2026), Chainlink settlement feed (Apr-Aug 2026, 10.5M ticks), Binance
-1s/100ms, 3,000-market order-book sample. Split: train < 2026-06-15, test
-after; test untouched so far except where marked.
+Final report (data pipeline coverage: Oct 2025 - Aug 2026; five BTC
+families; ~120K resolved markets; Chainlink settlement feed at 1s; Binance
+at 1s/100ms; 3,000-market book sample; live recorder + paper bot running).
+Discipline: train < 2026-06-15 < test; test revealed once with frozen
+parameters. Everything measured net of the verified current fee schedule.
 
-## 1. What we reproduced / refuted from the paper
+## 1. Verdict on the paper
 
-The paper (Semenas 2026) claimed a +4.6pp edge over break-even for a
-driftless N(d2) divergence rule on 182 trades over one two-day window, and
-itself flagged: CIs spanning zero, profit concentration, directional
-confound, no better calibration than the market.
+The paper claimed a +4.6pp edge for a driftless N(d2) divergence rule on
+182 trades in one two-day window, with candid caveats. At scale all of its
+caveats resolve against it:
 
-At scale (6,619 markets, both directions, real current fees):
-- **H1 REFUTED-as-profitable**: the paper's rule (taker at touch, 2pt
-  buffer) nets **-1.68c/share [CI -2.85,-0.46]**. Signals cluster near
-  p=0.5 where the 0.07*p*(1-p) taker fee peaks. Every taker null loses
-  (favorite -2.08c, random -2.14c).
-- **H15**: the market mid beats N(d2) under EVERY standard vol estimator
-  (best model Brier 0.13422 vs market 0.13147; market wins every phase,
-  crushes the final phase 0.0416 vs 0.0488). The paper's premise - model
-  sharper than market - is dead at scale.
-- **H18**: momentum drift conditioning adds nothing (driftless confirmed).
-- **H16**: settlement tails are t~5 (P(z>3.09) = 10x Gaussian); an
-  empirical isotonic G(z) replaces N(d2) properly. Still loses to the
-  market mid as a forecaster.
-- **Combination (mid+z)**: beats mid by a trivial 6e-5 Brier. The market
-  is ~efficient in the mean. **The paper was looking in the wrong place:
-  the exploitable structure is level shifts and flow events, not superior
-  forecasting.**
+- **Its strategy loses money**: taker at touch with a 2pt buffer nets
+  **-1.68c/share [CI -2.85,-0.46]** on 6,619 markets. Signals cluster near
+  p=0.5, exactly where the 0.07*p*(1-p) taker fee peaks. (H1)
+- **Its premise is inverted**: the market mid beats N(d2) under every vol
+  estimator tested (9 estimators x Gaussian/t/seasonal variants), in every
+  window phase, most decisively near expiry (Brier 0.0416 vs 0.0488). A
+  logit(mid)+z combination beats mid by a meaningless 6e-5. (H15, H3)
+- **What it got right**: the driftless reduction (momentum adds nothing -
+  H18), the framing of these contracts as digitals, and the honesty of its
+  own caveats. Its "open question" - real edge vs favorite-longshot bias -
+  resolves: the in-window favorite premium is real (+1.0-1.9pp,
+  direction-robust, strongest early-window) but is NOT harvestable by any
+  execution its framework implies.
+- **Beyond its lens**: Gaussian tails are wrong at these horizons
+  (t~5; P(|z|>3) is 10x Gaussian; a "2-sigma-certain" side with <30s left
+  is worth 0.91, not 0.977). We replaced N(d2) with an empirical isotonic
+  G(z) fit on ~800K settlement observations. Even that does not out-forecast
+  the market - but it correctly prices tails where the crowd's chasing is
+  worst.
 
-## 2. Venue biases (measured, cluster-robust)
+## 2. The venue's structure (what the data shows)
 
-- **Favorite-longshot bias exists unconditionally**: favorite-space gaps
-  (won - implied), 13,765 markets: +1.0 to +1.9pp across 0.6-0.97, both
-  sides separately, strongest EARLY window (+2.1pp at 0.8-0.9), fading
-  late. Hourly family shows it bigger (+1.9-2.6pp).
-- **But it is not naively harvestable**: fill-conditioned maker alpha
-  (every print = a maker fill) shows adverse selection eats the bias for
-  join-the-touch strategies (-0.77c realized vs +1.55pp unconditional at
-  0.8-0.9). The market's flow is Binance-informed; resting orders get
-  picked off faster than they collect the behavioral discount.
+- **Settlement verified**: updown = first Chainlink round at/after each
+  boundary (99.996% match, 47,590 mkts); hourly families = Binance candles
+  (100%). Ties go Up.
+- **Information frontier**: Binance leads the oracle round by ~2s + 1.1s
+  broadcast lag. The venue's top of book already embeds it - the fee
+  regime killed classic latency sniping and protects the book.
+- **Microstructure**: 1c spreads, $100-300 depth near the touch,
+  event-driven books, mirrored sibling books with mint/merge crossing.
+- **Behavioral regularities** (all cluster-robust): favorites underpriced
+  1-2pp (both sides, strongest early-window, larger on hourly); longshots
+  overpriced; final-second "leader chasing" and "winner dumping" flows.
 
-## 3. The pocket map (fill-conditioned maker alpha, phase x price)
+## 3. Strategy search: what was tried and what happened
 
-Positive pockets (15m family, replicated on hourly):
-- early-window favorites 0.7-0.97: +1.6..2.3c/share
-- mid-window favorites 0.8-0.97: +0.9..1.5c
-- endgame (last ~13s): the big one - see below.
-Negative sinks: the belly (0.3-0.7) mid/late/final; favorites in the final
-phase (stale bids sniped via the 2.5-3.5s Binance lead over the oracle).
+| Strategy family | Result |
+|---|---|
+| N(d2)/G(z) divergence, taker | -1.7c/sh - fees + market sharper than model |
+| G(z) divergence, maker | -2.6c/sh - adverse selection (fills = model wrong) |
+| FLB harvest, maker join (all phases / early-only / front-queue) | -0.8 / -0.8 / +0.3c [CI spans 0] - adverse selection eats the bias |
+| Fast-cancel maker (0.5s-10s cancel-on-move) | latency-INVARIANT -0.6..-0.9c - crossing flow is informed at the instant it crosses |
+| Endgame join-the-touch / fixed deep ladders / leader-offer | -1.0 to -6.7c - each intercepts the toxic slice of endgame flow |
+| **Vacuum ladder** (deep bids on model-winning side, last 27s) | Train: +39c/sh (15m), +29c/sh (5m), day-CI positive, 10x capacity, queue-irrelevant. **Test: -9.2c and -5.7c/sh, CIs firmly negative.** Weekly profile: ALL profit from the Apr 20 - May 10 crash episode; every other week bleeds. n=1 payoff event. |
+| Dump-activity gating of the above | No discriminating power - informed bursts mimic panic bursts |
+| Riskless structures (crossed books; strike-ladder monotonicity) | Crossed books: median 1c x 24 shares - scraps. Ladder arbs: see results table (H12) |
 
-## 4. The endgame vacuum (the finding)
+## 4. The honest conclusion
 
-Decomposing the endgame pocket by (print price - model fair):
-- fills near/below fair: adverse (-20c when takers cross below fair)
-- **fills at gap > 0.40: $1.03M printed volume where takers paid ~0.835
-  for contracts with model fair 0.068 - they failed 84%. Maker alpha
-  +67.5c/share.** Mechanism: holders of the WINNING side panic-dump into
-  post-flip book vacuums (UI cash-outs sweeping empty books); mirrored
-  prints confirm sibling-book bids intercept this flow via mint-crossing.
+**This venue, in its current regime, does not offer a validated always-on
+edge to a new entrant at any execution style we could test.** The crowd's
+mid is sharp; taker costs are prohibitive by design; and the passive side
+is adversely selected at every speed - the behavioral premia measurably
+exist but accrue only to counterparties of uninformed crossings, which no
+observable ex-ante filter isolates.
 
-**Strategy: model-gated vacuum ladder.** In the last ~27s, post bids at
-0.10/0.20/0.30 on the side with G(z) fair >= 0.65. Orders rest to window
-end; fills only happen in sweeps.
+What genuinely exists:
+1. **The crash-harvest (vacuum ladder)**: during the one violent BTC
+   dislocation in our sample (late Apr - early May 2026), panic dumping of
+   winning positions into empty books paid resting deep bids ~+65c/share
+   for two weeks (~$250K at $60-per-market sizing across 5m+15m). Between
+   such episodes the same ladders bleed ~$1.5-4K/week at that sizing, and
+   the June-Aug regime shows the residual flow is now informed (possibly
+   competitors). This is a speculative event strategy with a single
+   observed payoff - deployable only at sizes whose bleed you accept as an
+   option premium on the next crash, and only with live paper evidence
+   that the current-regime bleed matches expectations.
+2. **A real-time measurement apparatus**: the paper bot + recorder
+   (deployed) measure the venue's regime continuously - fill rates, dump
+   frequency, bleed - so a returning crash regime is detected from data,
+   not hope.
 
-Train results (15m, 72 days, conservative fills, queue=200, size=100/level):
-- +39.2c/share, +190% on stake, 1,979 fills on 717 markets
-- win rates 58/60/62% at the 0.10/0.20/0.30 levels (breakevens 10/20/30%)
-- **day-cluster CI on daily P&L [$338, $1,902], mean $1,054/day**
-- capacity: 10x size -> +38.1c/share unchanged, ~$9.5K/day, CI [$2.6K,$17.7K]
-- queue-position irrelevant (sweep-through fills) - no speed race
-- gate-robust (fv>=0.80: +46c/share)
-- risk shape: lottery-like; ~55% of days negative (small), top-5 days carry
-  ~86% of profit; worst train day -$537 at base size. Max loss per market =
-  $60 at base size.
-- hourly family: no detectable edge (dump flow 10-20x thinner, CI spans 0).
-- 5m family replication + untouched test period: PENDING (in flight).
+## 5. Relative to the paper
 
-## 5. Latency structure (measured)
-
-Binance leads the Chainlink oracle round by ~2s, and the round is broadcast
-~1.1s late: a ~2.5-3.5s information lead. It is worth 10% relative Brier in
-the last 15s - and the venue's top-of-book already reflects it (the market
-beats oracle-spot models in the final phase). The taker fee (max 1.75c at
-p=0.5) makes classic latency sniping unprofitable in the belly; the
-surviving expressions of the lead are (a) refusing to quote into it and
-(b) the vacuum ladder's model gate.
-
-## 6. What this venue actually pays for
-
-Not forecasting (the crowd's mid is sharp). It pays for:
-1. **Liquidity of last resort at panic moments** (the vacuum ladder).
-2. Patient early-window favorite liquidity (small, queue-dependent).
-3. Taking the other side of lottery longshots (blocked by fees for takers,
-   partially open to makers).
+Reproduced: the framework, the driftless reduction, the direction-robust
+favorite premium it could not disentangle. Refuted: its strategy's
+profitability under real fees at scale; its premise that a spot+vol model
+out-forecasts this market. Found beyond it: the correct (fat-tailed,
+empirical) pricing curve; the verified settlement/latency microstructure;
+the complete fill-conditioned map of where maker money actually goes; and
+the crash-flow phenomenon - the one structural inefficiency large enough
+to matter, together with the evidence discipline showing exactly how far
+it can currently be trusted.
