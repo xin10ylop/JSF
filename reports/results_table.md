@@ -22,3 +22,5 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | S9 | G(z) empirical pricing curve (isotonic, symmetrized, per rem bucket) | 800K train samples | final-30s: G(2)=0.909 vs Phi(2)=0.977 (7pp certainty haircut), shrinking with rem | MODEL BUILT |
 | S10 | Binance-adjusted spot vs oracle-known spot for settlement prediction | 700K samples | Brier gain concentrated in last 15s: 0.0563 vs 0.0628 (10% rel) | MEASURED - price off Binance |
 | H17a | Sniping EV upper bound (entry at oracle-fair, model space) | train windows | rem=5s, |dp|>0.05: 6% of windows, ~26c/sh before market reaction | UPPER BOUND - venue tape test pending |
+| H18 | Momentum drift conditioning (trailing 5m, standardized) added to z | 700K synthetic windows, out-of-time val | no Brier gain (0.15936 -> 0.15935 best); larger betas hurt | REJECTED - driftless pricing confirmed |
+| H2 | G(z) stability across vol regimes | same | fit-ALL beats regime-restricted fits on both regime slices | STABLE - no regime switching needed in pricer |
