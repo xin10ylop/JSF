@@ -92,14 +92,16 @@ def fit(save="data/gz_models.pkl"):
 
 
 def predict_gz(models_pkl, z, rem_s):
-    """Vectorized G(z) lookup with clipping at |z|<=4."""
-    z = np.clip(np.asarray(z, dtype=float), -4, 4)
+    """Vectorized G(z) lookup with clipping at |z|<=4. NaN-safe."""
+    z = np.asarray(z, dtype=float)
     rem_s = np.asarray(rem_s)
+    valid = ~np.isnan(z)
+    zc = np.clip(np.where(valid, z, 0.0), -4, 4)
     out = np.full(len(z), np.nan)
     for (lo, hi), iso in models_pkl["models"].items():
-        m = (rem_s > lo) & (rem_s <= hi)
+        m = (rem_s > lo) & (rem_s <= hi) & valid
         if m.any():
-            out[m] = iso.predict(z[m])
+            out[m] = iso.predict(zc[m])
     return out
 
 
