@@ -51,6 +51,44 @@ class GzValueMaker:
         return None
 
 
+class VacuumLadder:
+    """Crash-catching bids on the model-winning side in the final seconds.
+
+    In the last `window_s` seconds of each market: if G(z) fair for a side
+    >= fv_gate, post GTC bids on that side at the ladder levels. Orders rest
+    to window end. Fills only happen in panic sweeps (book vacuums); each
+    fill's expected value is fair - level (validated: +39c/share on 15m
+    train, day-cluster CI positive, capacity ~10x base, queue-insensitive).
+    """
+
+    def __init__(self, cfg):
+        self.window_s = cfg.get("window_s", 27)
+        self.fv_gate = cfg.get("fv_gate", 0.65)
+        self.levels = cfg.get("levels", [0.10, 0.20, 0.30])
+        self.size = cfg.get("size", 100)
+        self.posted = {}   # slug -> True once ladder posted
+
+    def evaluate(self, state, m, t_us):
+        rem_s = (m.t1_us - t_us) / 1e6
+        if rem_s > self.window_s or rem_s <= 1:
+            return None
+        if self.posted.get(m.slug):
+            return None
+        fair_up = state.fair(m, t_us)
+        if fair_up is None:
+            return None
+        if fair_up >= self.fv_gate:
+            side = "Up"
+        elif (1 - fair_up) >= self.fv_gate:
+            side = "Down"
+        else:
+            return None
+        self.posted[m.slug] = True
+        return {"action": "ladder", "side": side, "levels": self.levels,
+                "size": self.size, "ttl_s": rem_s,
+                "reason": f"vacuum fair={fair_up:.3f} rem={rem_s:.0f}s"}
+
+
 class ExtremeTaker:
     """Near-certainty taker buys where the fee ~ 0 and G says the book
     underprices the near-certain side (H9/H25/H17 region)."""

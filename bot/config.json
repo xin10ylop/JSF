@@ -1,19 +1,22 @@
 {
   "mode": "paper",
-  "families": {"15m": 900, "5m": 300},
+  "families": {
+    "15m": 900,
+    "5m": 300
+  },
   "risk": {
     "max_market_shares": 200,
-    "max_market_dollars": 150.0,
+    "max_market_dollars": 60.0,
     "max_concurrent_markets": 4,
-    "daily_loss_limit": 25.0,
+    "daily_loss_limit": 300.0,
     "stale_binance_s": 3.0,
     "stale_oracle_s": 5.0,
     "stale_book_s": 10.0
   },
   "gz_maker": {
-    "enabled": true,
+    "enabled": false,
     "edge_min": 0.03,
-    "min_tau_frac": 0.10,
+    "min_tau_frac": 0.1,
     "max_tau_frac": 0.97,
     "size": 50,
     "ttl_s": 20
@@ -23,6 +26,17 @@
     "min_price": 0.95,
     "edge_min": 0.015,
     "max_rem_s": 120,
+    "size": 100
+  },
+  "vacuum_ladder": {
+    "enabled": true,
+    "window_s": 27,
+    "fv_gate": 0.65,
+    "levels": [
+      0.1,
+      0.2,
+      0.3
+    ],
     "size": 100
   }
 }

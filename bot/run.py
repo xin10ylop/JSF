@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.state import BotState, MarketState, now_us  # noqa: E402
 from bot.paper import PaperBroker  # noqa: E402
 from bot.risk import Risk  # noqa: E402
-from bot.strategy import GzValueMaker, ExtremeTaker  # noqa: E402
+from bot.strategy import GzValueMaker, ExtremeTaker, VacuumLadder  # noqa: E402
 
 GAMMA = "https://gamma-api.polymarket.com/markets"
 CFG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -42,7 +42,9 @@ class Bot:
         self.broker = PaperBroker()
         self.risk = Risk(cfg.get("risk", {}))
         self.strategies = []
-        if cfg.get("gz_maker", {}).get("enabled", True):
+        if cfg.get("vacuum_ladder", {}).get("enabled", True):
+            self.strategies.append(VacuumLadder(cfg.get("vacuum_ladder", {})))
+        if cfg.get("gz_maker", {}).get("enabled", False):
             self.strategies.append(GzValueMaker(cfg.get("gz_maker", {})))
         if cfg.get("extreme_taker", {}).get("enabled", False):
             self.strategies.append(ExtremeTaker(cfg.get("extreme_taker", {})))
@@ -243,7 +245,14 @@ class Bot:
                                           if k != "action"},
                                        "action": sig["action"],
                                        "sized": size})
-                    if sig["action"] == "maker_buy":
+                    if sig["action"] == "ladder":
+                        for lvl in sig["levels"]:
+                            self.broker.maker_buy(
+                                m.slug, m.asset_id_up, sig["side"], lvl,
+                                size, 200.0,
+                                m.t1_us,
+                                meta={"reason": sig["reason"]})
+                    elif sig["action"] == "maker_buy":
                         self.broker.maker_buy(
                             m.slug, m.asset_id_up, sig["side"], sig["level"],
                             size, sig.get("queue_ahead", 0),
