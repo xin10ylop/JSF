@@ -1,7 +1,8 @@
 """Consolidate per-market trade parquets into per-family tables.
 
-Slims columns, writes one parquet per family, and (with --purge) deletes the
-raw per-market files afterwards to keep disk usage bounded.
+Chunked and resumable: processes raw files in batches, writes part files,
+then merges parts into one family parquet. With --purge, deletes raw files
+after their part is safely written.
 """
 import glob
 import os
@@ -19,48 +20,63 @@ FAMILIES = {
 
 KEEP = ["timestamp_us", "local_timestamp_us", "slug", "price", "size", "side",
         "origin_asset_id", "asset_id"]
+CHUNK = 4000
 
 
 def consolidate(family: str, raw_dir: str, purge: bool = False,
                 out_dir: str = "data/consolidated"):
     os.makedirs(out_dir, exist_ok=True)
+    part_dir = f"{out_dir}/parts_{family}"
+    os.makedirs(part_dir, exist_ok=True)
     out = f"{out_dir}/{family}.parquet"
     files = sorted(glob.glob(f"{raw_dir}/*.parquet"))
-    if not files:
-        print(f"{family}: no files yet")
+    if files:
+        for ci in range(0, len(files), CHUNK):
+            chunk = files[ci:ci + CHUNK]
+            part = f"{part_dir}/part_{ci//CHUNK:04d}.parquet"
+            if not os.path.exists(part):
+                frames = []
+                bad = []
+                for f in chunk:
+                    try:
+                        df = pd.read_parquet(f, columns=KEEP)
+                    except Exception:
+                        bad.append(f)
+                        continue
+                    if len(df):
+                        frames.append(df)
+                if frames:
+                    allf = pd.concat(frames, ignore_index=True)
+                    allf["price"] = allf.price.astype("float32")
+                    allf["size"] = allf["size"].astype("float32")
+                    allf["is_buy"] = (allf.side == "buy")
+                    allf["mirrored"] = allf.origin_asset_id != allf.asset_id
+                    allf = allf.drop(columns=["side", "origin_asset_id",
+                                              "asset_id"])
+                    tmp = part + ".tmp"
+                    allf.to_parquet(tmp, compression="zstd")
+                    os.replace(tmp, part)
+                print(f"{family}: part {ci//CHUNK} "
+                      f"({len(chunk)} files, {len(bad)} bad)", flush=True)
+            if purge:
+                for f in chunk:
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+    parts = sorted(glob.glob(f"{part_dir}/part_*.parquet"))
+    if not parts:
+        print(f"{family}: no parts")
         return
-    frames = []
-    bad = []
-    for f in files:
-        try:
-            df = pd.read_parquet(f, columns=KEEP)
-        except Exception:
-            bad.append(f)
-            continue
-        if len(df):
-            frames.append(df)
-    if not frames:
-        print(f"{family}: nothing readable ({len(bad)} bad)")
-        return
-    allf = pd.concat(frames, ignore_index=True)
-    allf["price"] = allf.price.astype("float32")
-    allf["size"] = allf["size"].astype("float32")
-    allf["is_buy"] = (allf.side == "buy")
-    allf["mirrored"] = allf.origin_asset_id != allf.asset_id
-    allf = allf.drop(columns=["side", "origin_asset_id", "asset_id"])
+    allf = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
     allf = allf.sort_values(["slug", "timestamp_us"]).reset_index(drop=True)
-    if os.path.exists(out):
-        prev = pd.read_parquet(out)
-        allf = (pd.concat([prev, allf], ignore_index=True)
-                .drop_duplicates(["slug", "timestamp_us", "price", "size", "is_buy"])
-                .sort_values(["slug", "timestamp_us"]).reset_index(drop=True))
-    allf.to_parquet(out, compression="zstd")
-    print(f"{family}: {len(files)} files ({len(bad)} bad) -> {len(allf)} trades")
-    if purge:
-        for f in files:
-            if f not in bad:
-                os.remove(f)
-        print(f"{family}: purged {len(files)-len(bad)} raw files")
+    tmp = out + ".tmp"
+    allf.to_parquet(tmp, compression="zstd")
+    os.replace(tmp, out)
+    print(f"{family}: consolidated {len(allf)} trades -> {out}", flush=True)
+    for p in parts:
+        os.remove(p)
+    os.rmdir(part_dir)
 
 
 if __name__ == "__main__":
