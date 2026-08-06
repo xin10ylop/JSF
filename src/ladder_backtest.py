@@ -19,11 +19,12 @@ import numpy as np
 import pandas as pd
 
 SPLIT_US = int(pd.Timestamp("2026-06-15").value // 1000)
-WIN_S = {"5m": 300, "15m": 900, "4h": 14400}
+WIN_S = {"5m": 300, "15m": 900, "4h": 14400, "hourly": 3600}
 
 
 def run(horizon, use_test=False):
-    fam = f"updown_{horizon}_trades"
+    fam = ("hourly_updown_trades" if horizon == "hourly"
+           else f"updown_{horizon}_trades")
     win = WIN_S[horizon]
     post_frac = float(os.environ.get("POST_FRAC", 0.9))
     queue = float(os.environ.get("QUEUE", 200.0))
@@ -31,9 +32,14 @@ def run(horizon, use_test=False):
     levels = [float(x) for x in
               os.environ.get("LEVELS", "0.05,0.10,0.15,0.20,0.25").split(",")]
 
-    m = pd.read_parquet("data/master_updown.parquet",
-                        columns=["slug", "horizon", "t0_us", "result"])
-    m = m[(m.horizon == horizon) & (m.result >= 0)]
+    if horizon == "hourly":
+        m = pd.read_parquet("data/master_hourly.parquet",
+                            columns=["slug", "t0_us", "result"])
+        m = m[m.result >= 0]
+    else:
+        m = pd.read_parquet("data/master_updown.parquet",
+                            columns=["slug", "horizon", "t0_us", "result"])
+        m = m[(m.horizon == horizon) & (m.result >= 0)]
     m = m[m.t0_us >= SPLIT_US] if use_test else m[m.t0_us < SPLIT_US]
     res = dict(zip(m.slug, m.result))
     t0s = dict(zip(m.slug, m.t0_us))
@@ -42,7 +48,14 @@ def run(horizon, use_test=False):
     # at posting time (fv from the decision grid, nearest point <= t_post)
     fv_gate = float(os.environ.get("FV_GATE", 0.0))
     fv_map = {}
-    if fv_gate > 0:
+    if fv_gate > 0 and horizon == "hourly":
+        g = pd.read_parquet("data/grid_hourly.parquet",
+                            columns=["slug", "tau_s", "fv"])
+        g = g[g.fv.notna()]
+        post_off_s = float(os.environ.get("POST_FRAC", 0.9)) * WIN_S[horizon]
+        gg = g[g.tau_s <= post_off_s].sort_values("tau_s").groupby("slug").last()
+        fv_map = dict(zip(gg.index, gg.fv))
+    elif fv_gate > 0:
         import pickle
         sys.path.insert(0, "src")
         from fit_gz import predict_gz
