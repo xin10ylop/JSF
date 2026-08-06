@@ -1,5 +1,14 @@
 # Polymarket BTC binaries bot
 
+**Status (2026-08-06): measurement mode.** The vacuum-ladder strategy
+failed its out-of-sample test (all historical profit came from one crash
+episode, Apr 20 - May 10 2026; normal regimes bleed). The paper bot now
+serves as the venue's regime-measurement apparatus: it paper-runs the
+ladder continuously, logging fills, dump frequency, and bleed, so that a
+returning crash regime is detected from live evidence. DO NOT wire live
+orders on the historical backtest alone - see reports/findings.md and
+reports/audit.md.
+
 Paper-first trading bot for `btc-updown-{5m,15m}` markets. Prices contracts
 with the empirical G(z) curve (fit from the Chainlink settlement feed +
 Binance vol; see `src/fit_gz.py`), using basis-adjusted Binance spot and the

@@ -53,3 +53,6 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | VAC-WEEKLY | Weekly P&L profile, 5m, full span | all | ALL profit from Apr20-May10 crash episode (+$213K of +$237K in one week, win 85%); EVERY other week negative (-$0.3-3.8K/wk, win 11-22%) incl. early April (in-train) | RECLASSIFIED: crash-event harvester, n=1 event; NOT a continuing edge; bleeds in normal regimes |
 | FASTCANCEL | Cancel-on-move maker defense, mid-window favs, latency 0.5s/2s/10s/inf | Jun-Aug | alpha -0.74/-0.63/-0.89/-0.81 c/sh - latency-invariant | NEGATIVE - informed-at-crossing flow; speed does not rescue makers |
 | VAC-GATE | Dump-activity gating of vacuum ladder | full span | normal-week bleed unchanged (-$30K); no discriminating power | NEGATIVE - bursts mimic crashes |
+| ABOVE-VOL | Above-strike hourly family total volume | full | 163,447 trades TOTAL (~4.6/mkt) | family is illiquid; H12/H14/H29 capacity ~ zero |
+| H12 | Ladder monotonicity scan | full | 90 apparent violations / 64K snapshots, mean 12.6c gross | stale-print artifacts on illiquid family; NOT executable; CLOSED |
+| H27 | Daily above family | - | untested in depth; family thinner than hourly above | CLOSED as untradeable at scale |
