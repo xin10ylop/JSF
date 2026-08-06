@@ -78,3 +78,22 @@ that both equal the real venue. Every row is a potential divergence between
 | Untouched TEST period (both families) | PENDING (single reveal, frozen params) |
 | Live paper fills vs backtest expectations | RUNNING (bot live since 02:40 UTC) |
 | WS print completeness vs Telonex tape | SCHEDULED (after daily publish) |
+
+## G. Print completeness (ws feed vs Telonex tape)
+
+Measured 2026-08-06 against the published Aug-5 tape:
+
+- **Old recorder architecture** (synchronous writes, single-cycle
+  subscriptions; ran Aug-5 evening): captured **0-4% of in-window prints**
+  across four reconciled 15m markets (36 of 936; then 0 of 492/912/828).
+  Root causes: server "slow consumer" kicks from blocking disk writes +
+  subscription cycling. THIS is the class of silent failure that would have
+  made paper fills fictional - caught by this reconciliation.
+- **New architecture** (queue-decoupled recv, batched writers; live since
+  03:00 UTC): captures 2,600-5,700 trade events per 15m wall-clock window
+  across ~4 subscribed markets x both tokens - consistent with full capture
+  (typical tape: 500-950 prints/market-window). RTDS oracle capture also
+  recovered from ~500/h to the full ~6,800/h rate.
+- Definitive ratio vs the Aug-6 tape: scheduled for the next publication
+  cycle. Paper-bot fills logged before 2026-08-06 03:00 UTC should be
+  treated as unreliable (broken feed); fills after are on the fixed feed.
