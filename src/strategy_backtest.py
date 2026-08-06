@@ -24,7 +24,7 @@ from fit_gz import predict_gz
 
 SPLIT_US = int(pd.Timestamp("2026-06-15").value // 1000)
 SIZE = 100.0
-QUEUE_TYPICAL = 400.0  # shares ahead at the touch (book-sample median ~375-480)
+QUEUE_TYPICAL = float(__import__("os").environ.get("QUEUE", 400.0))
 
 
 def basis_ratio_series():

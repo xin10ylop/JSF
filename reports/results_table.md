@@ -34,3 +34,7 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | SBT-gz | GzValueMaker backtest (maker at bid on model divergence, q=400) | train | -2.59c/sh, -6.12% stake, win 39.7% | STRONG NEGATIVE - adverse selection vs better-informed flow |
 | SBT-flb1 | FLB maker 0.78-0.92, tau<=66%, veto, q=400 | train | -0.77c/sh [-5.2,+1.1]/mkt; fill-cond win 83.1% vs uncond 85.5% | NEGATIVE - adverse selection 2.4pp > bias 1.55pp |
 | PRINTS | Fill-conditioned maker alpha map, phase x price (all printed volume) | train | POCKETS: early favs 0.7-0.97 +1.6..2.3c ($24M vol); mid favs 0.8-0.97 +0.9..1.5c; ENDGAME longshots 0.03-0.3 +5..15c ($12M); belly & final favs negative | MAP FOUND - pockets to validate with cluster CIs |
+| ENDGAME-15m | Endgame longshot pocket forensics (maker bids 0.03-0.30, last 13.5s) | 136K prints, 3,150 mkts, 147 days, $3.5M vol | +12.2c/sh; day-cluster CI [5.4,19.6]; 48% days negative; top-5 days = 70% of alpha; win 24.6% at entry 0.124 (~98% EV/stake) | REAL but lottery-shaped; jump-catcher |
+| SBT-ef-q400 | Early-fav maker pocket backtest, back-of-queue | train | -0.77c/sh [-5.0,+1.5]/mkt | queue position decides who gets the pocket |
+| FLB-hourly | Hourly family favorite-space FLB (3,421 mkts) | train | 0.8-0.9 +1.92pp [0.19,3.48]; Down-favs +2.0-2.6pp; larger than 15m | H26 SUPPORTED - less bot attention, bigger bias |
+| MAP-hourly | Hourly maker alpha map | train | replicates all 15m pockets (early favs +1.4-1.9c, mid favs +1.9c, endgame longshots +9.1c, endgame favs negative) | CROSS-FAMILY REPLICATION |
