@@ -63,14 +63,34 @@ def run(horizon, edge_min=0.03, ttl_s=20.0, use_test=False):
     g["fv"] = predict_gz(gz, g.z.values, g.rem_s.values)
     g = g[g.fv.notna()]
 
-    # signals: buy Up at bid_tape when fv - bid >= edge_min;
-    # buy Down at (1-ask_tape) when (1-fv) - (1-ask) >= edge_min
-    up_sig = g[(g.fv - g.bid_tape) >= edge_min].copy()
-    up_sig["side"] = "Up"
-    up_sig["level"] = up_sig.bid_tape
-    dn_sig = g[(g.ask_tape - g.fv) >= edge_min].copy()
-    dn_sig["side"] = "Down"
-    dn_sig["level"] = 1 - dn_sig.ask_tape
+    mode = "flb" if "flb" in sys.argv else "gz"
+    if mode == "gz":
+        # buy Up at bid when fv - bid >= edge_min; Down mirrored
+        up_sig = g[(g.fv - g.bid_tape) >= edge_min].copy()
+        up_sig["side"] = "Up"
+        up_sig["level"] = up_sig.bid_tape
+        dn_sig = g[(g.ask_tape - g.fv) >= edge_min].copy()
+        dn_sig["side"] = "Down"
+        dn_sig["level"] = 1 - dn_sig.ask_tape
+    else:
+        # FLB-primary pockets, parameterized via env:
+        #   POCKET=early_fav | endgame_long
+        import os
+        win_s = {"15m": 900, "5m": 300, "4h": 14400}[horizon]
+        pocket = os.environ.get("POCKET", "early_fav")
+        if pocket == "early_fav":
+            ph = g[g.tau_s <= 0.33 * win_s]
+            lo, hi = 0.70, 0.97
+        else:  # endgame_long: bid for abandoned longshots, last 1.5%
+            ph = g[g.tau_s >= 0.985 * win_s]
+            lo, hi = 0.03, 0.30
+        up_sig = ph[(ph.bid_tape >= lo) & (ph.bid_tape <= hi)].copy()
+        up_sig["side"] = "Up"
+        up_sig["level"] = up_sig.bid_tape
+        dn_bid = 1 - ph.ask_tape
+        dn_sig = ph[(dn_bid >= lo) & (dn_bid <= hi)].copy()
+        dn_sig["side"] = "Down"
+        dn_sig["level"] = 1 - dn_sig.ask_tape
     sig = pd.concat([up_sig, dn_sig], ignore_index=True)
     sig = sig.sort_values(["slug", "t_us"])
     print(f"signals: {len(sig)} at {sig.slug.nunique()} markets "

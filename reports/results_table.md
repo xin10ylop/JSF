@@ -24,3 +24,13 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | H17a | Sniping EV upper bound (entry at oracle-fair, model space) | train windows | rem=5s, |dp|>0.05: 6% of windows, ~26c/sh before market reaction | UPPER BOUND - venue tape test pending |
 | H18 | Momentum drift conditioning (trailing 5m, standardized) added to z | 700K synthetic windows, out-of-time val | no Brier gain (0.15936 -> 0.15935 best); larger betas hurt | REJECTED - driftless pricing confirmed |
 | H2 | G(z) stability across vol regimes | same | fit-ALL beats regime-restricted fits on both regime slices | STABLE - no regime switching needed in pricer |
+| H4/FLB-full | Favorite-space calibration, FULL 15m history (13,765 mkts, snapshots, cluster CI) | train | 0.6-0.7 +1.04pp [0.06,1.92]; 0.8-0.9 +1.55pp [0.72,2.24]; 0.9-0.97 +0.54 [0.07,1.08]; 0.97-1 +0.41 [0.24,0.58]; both sides positive | CONFIRMED unconditionally |
+| H5 | FLB by phase | train | 0.8-0.9 EARLY +2.09pp [0.93,3.18] vs LATE +0.41 [-1.08,1.85] | REVERSED - bias lives early-window, not late |
+| H15 | Estimator race: N(d2) vs market mid, 613K pts, 6,621 mkts | train | market 0.13147 beats ALL estimators (best 0.13422); market wins EVERY phase; crushes final (0.0416 vs 0.0488) | MARKET WINS - paper's premise dead at scale |
+| H16 | t4-tails and seasonality variants | train | both worse than calibrated Gaussian in Brier | NO HELP in mid-band; tails matter only at extremes (G(z) handles) |
+| H1 | Paper rule (N(d2)+2pt buffer, taker) on 6,619 mkts | train | ewma5m: -1.68c/sh [-2.85,-0.46]; ewma30m: -1.22 [-2.45,-0.01]; all taker nulls negative | CONFIRMED NEGATIVE - published strategy loses money at scale under real fees |
+| Edge-Brier | G(z) w/ Binance-adj spot vs market | train | market wins every phase (final 0.0415 vs 0.0484) | market is Binance-informed and fast |
+| Comb | logit(mid)+z combination forecaster | internal val | 0.13240 vs mid 0.13246 - trivial gain; z weight big only early-window | MARKET ~EFFICIENT in mean; exploit level shifts, not forecasts |
+| SBT-gz | GzValueMaker backtest (maker at bid on model divergence, q=400) | train | -2.59c/sh, -6.12% stake, win 39.7% | STRONG NEGATIVE - adverse selection vs better-informed flow |
+| SBT-flb1 | FLB maker 0.78-0.92, tau<=66%, veto, q=400 | train | -0.77c/sh [-5.2,+1.1]/mkt; fill-cond win 83.1% vs uncond 85.5% | NEGATIVE - adverse selection 2.4pp > bias 1.55pp |
+| PRINTS | Fill-conditioned maker alpha map, phase x price (all printed volume) | train | POCKETS: early favs 0.7-0.97 +1.6..2.3c ($24M vol); mid favs 0.8-0.97 +0.9..1.5c; ENDGAME longshots 0.03-0.3 +5..15c ($12M); belly & final favs negative | MAP FOUND - pockets to validate with cluster CIs |

@@ -105,12 +105,12 @@ def paper_rule(g, scales, est, label, buffer=0.02):
     settlement, one trade per market (first signal)."""
     f = g[g.fresh & g.mid.notna()].copy()
     f["fv"] = fv_gauss(f, est, scales[est])
-    f["div"] = f.fv - f.mid
-    sig = f[np.abs(f.div) >= buffer].sort_values("t_us").groupby("slug").first()
+    f["dvg"] = f.fv - f.mid
+    sig = f[np.abs(f.dvg) >= buffer].sort_values("t_us").groupby("slug").first()
     if len(sig) == 0:
         print(f"{label}: no signals")
         return
-    buy_up = sig.div > 0
+    buy_up = sig.dvg > 0
     entry = np.where(buy_up, sig.ask_tape, 1 - sig.bid_tape)
     win = np.where(buy_up, sig.y, 1 - sig.y)
     fee = FEE * entry * (1 - entry)
