@@ -38,6 +38,43 @@ def run(horizon, use_test=False):
     res = dict(zip(m.slug, m.result))
     t0s = dict(zip(m.slug, m.t0_us))
 
+    # optional model gate: only ladder the side whose model fair >= FV_GATE
+    # at posting time (fv from the decision grid, nearest point <= t_post)
+    fv_gate = float(os.environ.get("FV_GATE", 0.0))
+    fv_map = {}
+    if fv_gate > 0:
+        import pickle
+        sys.path.insert(0, "src")
+        from fit_gz import predict_gz
+        import glob as _glob
+        g = pd.read_parquet(f"data/grid_{horizon}.parquet",
+                            columns=["slug", "t_us", "tau_s", "rem_s",
+                                     "spot_bn", "strike", "ewma5m"])
+        g = g[g.spot_bn.notna() & g.strike.notna()]
+        cp = pd.read_parquet("data/telonex/chainlink_btcusd.parquet")
+        cp_b = cp.sort_values("server_timestamp_us")
+        cp_b["bsec"] = cp_b.server_timestamp_us // 1_000_000
+        kp = cp_b.groupby("bsec").price_f.last()
+        gr = np.arange(kp.index[0], kp.index[-1] + 1)
+        kpf = kp.reindex(gr).ffill().values
+        bn = pd.concat([pd.read_parquet(f, columns=["open_time", "close"])
+                        for f in sorted(_glob.glob("data/binance/parquet/*.parquet"))],
+                       ignore_index=True)
+        bn["sec"] = (bn.open_time // 1_000_000).astype("int64")
+        bnp = bn.set_index("sec").close.reindex(gr).ffill().values
+        ratio = pd.Series(kpf / bnp).rolling(600, min_periods=60).median().shift(1)
+        g["spot_adj"] = g.spot_bn * pd.Series(ratio.values, index=gr).reindex(
+            g.t_us // 1_000_000).values
+        gz = pickle.load(open("data/gz_models.pkl", "rb"))
+        g["z"] = (np.log(g.spot_adj / g.strike)
+                  / np.sqrt(gz["K"] * g.ewma5m * g.rem_s))
+        g["fv"] = predict_gz(gz, g.z.values, g.rem_s.values)
+        g = g[g.fv.notna()]
+        # fv at the last grid point <= post time for each slug
+        post_off_s = float(os.environ.get("POST_FRAC", 0.9)) * WIN_S[horizon]
+        gg = g[g.tau_s <= post_off_s].sort_values("tau_s").groupby("slug").last()
+        fv_map = dict(zip(gg.index, gg.fv))
+
     t = pd.read_parquet(f"data/consolidated/{fam}.parquet",
                         columns=["timestamp_us", "slug", "price", "size",
                                  "is_buy"])
@@ -61,8 +98,19 @@ def run(horizon, use_test=False):
         tbuy = tape.is_buy.values[i0:i1]
         # Up-side ladder: sell prints (is_buy False) at price <= level
         # Down-side ladder: buy prints at price >= 1 - level
+        sides = ("Up", "Down")
+        if fv_gate > 0:
+            fv = fv_map.get(slug)
+            if fv is None:
+                continue
+            if fv >= fv_gate:
+                sides = ("Up",)
+            elif fv <= 1 - fv_gate:
+                sides = ("Down",)
+            else:
+                continue
         for lvl in levels:
-            for side in ("Up", "Down"):
+            for side in sides:
                 q = queue
                 rem = size
                 got = 0.0
