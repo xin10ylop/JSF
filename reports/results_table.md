@@ -38,3 +38,6 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | SBT-ef-q400 | Early-fav maker pocket backtest, back-of-queue | train | -0.77c/sh [-5.0,+1.5]/mkt | queue position decides who gets the pocket |
 | FLB-hourly | Hourly family favorite-space FLB (3,421 mkts) | train | 0.8-0.9 +1.92pp [0.19,3.48]; Down-favs +2.0-2.6pp; larger than 15m | H26 SUPPORTED - less bot attention, bigger bias |
 | MAP-hourly | Hourly maker alpha map | train | replicates all 15m pockets (early favs +1.4-1.9c, mid favs +1.9c, endgame longshots +9.1c, endgame favs negative) | CROSS-FAMILY REPLICATION |
+| SBT-eg-join | Endgame join-the-touch longshot bid | train | -4.2 to -4.8c/sh; stale-tape chasing | NEGATIVE - wrong implementation of pocket |
+| SBT-ladder | Fixed deep-bid ladders 0.05-0.30 (last 90s / last 13.5s) | train | -6.7 / -6.5 c/sh; only 0.05 level positive | NEGATIVE - fixed levels sell favorites below fair |
+| DECOMP | Endgame pocket decomposition by mirror/aggressor | train | dumps into bids +3.9c (n=11K); favorite-chase passive side +14.8c (n=53K, fails 27.9% at 0.869!) | POCKET = SELLING THE CHASED LEADER ABOVE FAIR, not deep bids |
