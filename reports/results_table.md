@@ -56,3 +56,6 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | ABOVE-VOL | Above-strike hourly family total volume | full | 163,447 trades TOTAL (~4.6/mkt) | family is illiquid; H12/H14/H29 capacity ~ zero |
 | H12 | Ladder monotonicity scan | full | 90 apparent violations / 64K snapshots, mean 12.6c gross | stale-print artifacts on illiquid family; NOT executable; CLOSED |
 | H27 | Daily above family | - | untested in depth; family thinner than hourly above | CLOSED as untradeable at scale |
+| H1-5m | Paper rule on 5m family | train, 19,865 trades | -2.28c/sh [CI -2.97,-1.63] | CONFIRMS: loses harder on 5m |
+| H15-5m | Estimator race 5m | 1.39M pts | market beats G/Phi every phase (final 0.0444 vs 0.0574) | CONFIRMS market sharpness |
+| FLB-above | Above family FLB | 25 usable snapshot-mkts | n too small; family illiquid | CLOSED |
