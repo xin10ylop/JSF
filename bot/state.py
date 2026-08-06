@@ -34,22 +34,35 @@ class OnlineVol:
         self.last_px = None
 
     def update(self, sec, px):
-        if self.last_px is not None and self.last_sec is not None:
-            dt = sec - self.last_sec
-            if dt > 0:
-                r = math.log(px / self.last_px)
-                r2_per_s = (r * r) / dt
-                for _ in range(min(int(dt), 10)):
-                    if self.var is None:
-                        self.var = r2_per_s
-                    else:
-                        self.var += self.alpha * (r2_per_s - self.var)
+        """Update only on second boundaries so the estimator matches the
+        backtest's strict 1s-grid EWMA (audit item: identical inputs)."""
+        if self.last_sec is None:
+            self.last_sec = sec
+            self.last_px = px
+            return
+        if sec <= self.last_sec:
+            self.last_px = px          # track latest price within the second
+            return
+        dt = sec - self.last_sec
+        r = math.log(px / self.last_px)
+        r2_per_s = (r * r) / dt
+        for _ in range(min(int(dt), 10)):
+            if self.var is None:
+                self.var = r2_per_s
+            else:
+                self.var += self.alpha * (r2_per_s - self.var)
         self.last_sec = sec
         self.last_px = px
 
 
 class GzPricer:
-    def __init__(self, path="data/gz_models.pkl", k_cal=None):
+    def __init__(self, path=None, k_cal=None):
+        if path is None:
+            import os
+            here = os.path.dirname(os.path.abspath(__file__))
+            cand = [os.path.join(here, "gz_models.pkl"),
+                    "data/gz_models.pkl"]
+            path = next(p for p in cand if os.path.exists(p))
         with open(path, "rb") as f:
             obj = pickle.load(f)
         self.models = obj["models"]
