@@ -168,6 +168,21 @@ class Bot:
 
     async def clob_feed(self):
         url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+        queue = asyncio.Queue(50_000)
+
+        async def consumer():
+            while True:
+                msg = await queue.get()
+                if msg == "PONG":
+                    continue
+                try:
+                    d = json.loads(msg)
+                except Exception:  # noqa: BLE001
+                    continue
+                for ev in (d if isinstance(d, list) else [d]):
+                    self._on_clob(ev)
+
+        asyncio.create_task(consumer())
         while True:
             ids = []
             for m in self.state.markets.values():
@@ -178,7 +193,7 @@ class Bot:
                 await asyncio.sleep(5)
                 continue
             try:
-                async with websockets.connect(url, ping_interval=None) as ws:
+                async with websockets.connect(url, ping_interval=None, max_size=2**24) as ws:
                     await ws.send(json.dumps(
                         {"assets_ids": ids, "type": "market"}))
 
@@ -191,14 +206,10 @@ class Bot:
                     try:
                         while time.time() < t_end:
                             msg = await asyncio.wait_for(ws.recv(), timeout=30)
-                            if msg == "PONG":
-                                continue
                             try:
-                                d = json.loads(msg)
-                            except Exception:  # noqa: BLE001
-                                continue
-                            for ev in (d if isinstance(d, list) else [d]):
-                                self._on_clob(ev)
+                                queue.put_nowait(msg)
+                            except asyncio.QueueFull:
+                                pass
                     finally:
                         pt.cancel()
             except Exception as e:  # noqa: BLE001

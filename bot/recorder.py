@@ -1,17 +1,13 @@
 """Live recorder: Binance trades, Polymarket RTDS oracle ticks, and CLOB
 books for active BTC updown markets.
 
-Writes hourly-rotated jsonl files under data/live/<stream>/YYYY-MM-DD_HH.jsonl
-Every record gets local receive time (t_local_us, wall clock) added.
+Architecture: each websocket recv loop ONLY enqueues raw frames; a single
+writer task per stream drains its queue, parses, filters, and writes
+batched lines. This keeps socket consumption fast (no slow-consumer kicks)
+and makes losses visible (queue-full drops are counted and logged).
 
-Streams:
-- binance: wss://stream.binance.com:9443/ws/btcusdt@trade
-- rtds:    wss://ws-live-data.polymarket.com  (crypto_prices chainlink+binance)
-- clob:    wss://ws-subscriptions-clob.polymarket.com/ws/market for the
-           currently-active and next 15m/5m/1h updown markets (asset ids
-           discovered via the Gamma API from deterministic slugs).
-
-Run: python3 bot/recorder.py   (runs until killed)
+Writes hourly-rotated jsonl under data/live/<stream>/YYYY-MM-DD_HH.jsonl
+with t_local_us added to every record.
 """
 import asyncio
 import json
@@ -34,161 +30,172 @@ class Writer:
         self.stream = stream
         self.f = None
         self.hour = None
+        self.buf = []
         os.makedirs(f"{LIVE_DIR}/{stream}", exist_ok=True)
 
-    def write(self, obj):
+    def add(self, obj):
+        obj["t_local_us"] = now_us()
+        self.buf.append(json.dumps(obj, separators=(",", ":")))
+
+    def flush(self):
+        if not self.buf:
+            return
         h = time.strftime("%Y-%m-%d_%H", time.gmtime())
         if h != self.hour:
             if self.f:
                 self.f.close()
             self.f = open(f"{LIVE_DIR}/{self.stream}/{h}.jsonl", "a")
             self.hour = h
-        obj["t_local_us"] = now_us()
-        self.f.write(json.dumps(obj, separators=(",", ":")) + "\n")
-
-    def flush(self):
-        if self.f:
-            self.f.flush()
+        self.f.write("\n".join(self.buf) + "\n")
+        self.f.flush()
+        self.buf = []
 
 
-async def binance_stream():
-    w = Writer("binance")
-    url = "wss://data-stream.binance.vision/ws/btcusdt@trade"
+async def pump(url, queue, name, subscribe=None, ping_text=None,
+               ping_every=5, resub_s=None):
+    """Connect, subscribe, enqueue every frame. Reconnect forever."""
     while True:
         try:
-            async with websockets.connect(url, ping_interval=20) as ws:
-                n = 0
-                async for msg in ws:
-                    d = json.loads(msg)
-                    w.write({"p": d.get("p"), "q": d.get("q"),
-                             "T": d.get("T"), "m": d.get("m")})
-                    n += 1
-                    if n % 100 == 0:
-                        w.flush()
-        except Exception as e:  # noqa: BLE001
-            print(f"binance reconnect: {e}", flush=True)
-            await asyncio.sleep(2)
-
-
-async def rtds_stream():
-    w = Writer("rtds")
-    url = "wss://ws-live-data.polymarket.com"
-    sub = {"action": "subscribe", "subscriptions": [
-        {"topic": "crypto_prices_chainlink", "type": "*"},
-        {"topic": "crypto_prices", "type": "update"},
-    ]}
-    while True:
-        try:
-            async with websockets.connect(url) as ws:
-                await ws.send(json.dumps(sub))
+            async with websockets.connect(url, ping_interval=20,
+                                          max_size=2**24) as ws:
+                if subscribe:
+                    await ws.send(json.dumps(subscribe()))
 
                 async def pinger():
                     while True:
-                        await asyncio.sleep(5)
-                        await ws.send("PING")
+                        await asyncio.sleep(ping_every)
+                        await ws.send(ping_text)
 
-                ptask = asyncio.create_task(pinger())
-                n = 0
+                pt = asyncio.create_task(pinger()) if ping_text else None
+                t_end = time.time() + resub_s if resub_s else None
                 try:
-                    async for msg in ws:
-                        if msg == "PONG":
-                            continue
+                    while True:
+                        if t_end and time.time() > t_end:
+                            break
+                        msg = await asyncio.wait_for(ws.recv(), timeout=30)
                         try:
-                            d = json.loads(msg)
-                        except Exception:  # noqa: BLE001
-                            continue
-                        sym = str(d.get("payload", {}).get("symbol", ""))
-                        if not sym.startswith("btc"):
-                            continue
-                        w.write(d)
-                        n += 1
-                        if n % 5 == 0:
-                            w.flush()
+                            queue.put_nowait(msg)
+                        except asyncio.QueueFull:
+                            try:
+                                queue.get_nowait()
+                                queue.put_nowait(msg)
+                            except Exception:  # noqa: BLE001
+                                pass
                 finally:
-                    ptask.cancel()
+                    if pt:
+                        pt.cancel()
         except Exception as e:  # noqa: BLE001
-            print(f"rtds reconnect: {e}", flush=True)
+            print(f"{name} reconnect: {str(e)[:120]}", flush=True)
             await asyncio.sleep(2)
 
 
-async def discover_assets(session):
-    """Asset ids for current & next updown windows (15m, 5m, 1h ET series
-    skipped - focus on chainlink families)."""
-    out = {}
-    now = int(time.time())
-    slugs = []
-    for step, fam in [(900, "15m"), (300, "5m")]:
-        t0 = now - (now % step)
-        for k in (0, 1):
-            slugs.append(f"btc-updown-{fam}-{t0 + k * step}")
-    for slug in slugs:
+async def binance_writer(queue):
+    w = Writer("binance")
+    while True:
+        msg = await queue.get()
         try:
-            async with session.get(GAMMA, params={"slug": slug},
-                                   timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status != 200:
-                    continue
-                arr = await r.json()
-                if not arr:
-                    continue
-                m = arr[0]
-                toks = m.get("clobTokenIds")
-                if isinstance(toks, str):
-                    toks = json.loads(toks)
-                if toks:
-                    out[slug] = toks[0]  # Up token; tape is mirrored
+            d = json.loads(msg)
         except Exception:  # noqa: BLE001
             continue
-    return out
+        w.add({"p": d.get("p"), "q": d.get("q"), "T": d.get("T"),
+               "m": d.get("m")})
+        if queue.empty() or len(w.buf) >= 200:
+            w.flush()
 
 
-async def clob_stream():
+async def rtds_writer(queue):
+    w = Writer("rtds")
+    while True:
+        msg = await queue.get()
+        if msg == "PONG":
+            continue
+        try:
+            d = json.loads(msg)
+        except Exception:  # noqa: BLE001
+            continue
+        sym = str(d.get("payload", {}).get("symbol", ""))
+        if not sym.startswith("btc"):
+            continue
+        w.add(d)
+        if queue.empty() or len(w.buf) >= 50:
+            w.flush()
+
+
+async def clob_writer(queue):
     w = Writer("clob")
-    url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    while True:
+        msg = await queue.get()
+        if msg == "PONG":
+            continue
+        try:
+            d = json.loads(msg)
+        except Exception:  # noqa: BLE001
+            continue
+        for ev in (d if isinstance(d, list) else [d]):
+            if isinstance(ev, dict) and "bids" in ev:
+                ev = dict(ev)
+                ev["bids"] = ev["bids"][-3:]
+                ev["asks"] = ev["asks"][-3:]
+            w.add(ev)
+        if queue.empty() or len(w.buf) >= 500:
+            w.flush()
+
+
+CLOB_ASSETS = []
+
+
+async def refresh_assets():
+    global CLOB_ASSETS
     async with aiohttp.ClientSession() as session:
         while True:
-            try:
-                assets = await discover_assets(session)
-                if not assets:
-                    await asyncio.sleep(10)
-                    continue
-                ids = list(assets.values())
-                async with websockets.connect(url, ping_interval=None) as ws:
-                    await ws.send(json.dumps(
-                        {"assets_ids": ids, "type": "market"}))
-
-                    async def pinger():
-                        while True:
-                            await asyncio.sleep(10)
-                            await ws.send("PING")
-
-                    ptask = asyncio.create_task(pinger())
-                    t_end = time.time() + 300  # resubscribe every 5 min
+            out = []
+            now = int(time.time())
+            for step, fam in [(900, "15m"), (300, "5m")]:
+                t0 = now - (now % step)
+                for k in (0, 1):
+                    slug = f"btc-updown-{fam}-{t0 + k * step}"
                     try:
-                        while time.time() < t_end:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=30)
-                            if msg == "PONG":
+                        async with session.get(
+                                GAMMA, params={"slug": slug},
+                                timeout=aiohttp.ClientTimeout(total=10)) as r:
+                            if r.status != 200:
                                 continue
-                            try:
-                                d = json.loads(msg)
-                            except Exception:  # noqa: BLE001
-                                continue
-                            evs = d if isinstance(d, list) else [d]
-                            for ev in evs:
-                                if isinstance(ev, dict) and "bids" in ev:
-                                    ev = dict(ev)
-                                    ev["bids"] = ev["bids"][-3:]
-                                    ev["asks"] = ev["asks"][-3:]
-                                w.write(ev)
-                        w.flush()
-                    finally:
-                        ptask.cancel()
-            except Exception as e:  # noqa: BLE001
-                print(f"clob reconnect: {e}", flush=True)
-                await asyncio.sleep(2)
+                            arr = await r.json()
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if not arr:
+                        continue
+                    toks = arr[0].get("clobTokenIds")
+                    if isinstance(toks, str):
+                        toks = json.loads(toks)
+                    if toks:
+                        out.extend(toks[:2])
+            if out:
+                CLOB_ASSETS = out
+            await asyncio.sleep(60)
 
 
 async def main():
-    await asyncio.gather(binance_stream(), rtds_stream(), clob_stream())
+    qb = asyncio.Queue(50_000)
+    qr = asyncio.Queue(50_000)
+    qc = asyncio.Queue(50_000)
+    rtds_sub = lambda: {"action": "subscribe", "subscriptions": [  # noqa: E731
+        {"topic": "crypto_prices_chainlink", "type": "*"},
+        {"topic": "crypto_prices", "type": "update"}]}
+    clob_sub = lambda: {"assets_ids": list(CLOB_ASSETS), "type": "market"}  # noqa: E731
+    await asyncio.gather(
+        pump("wss://data-stream.binance.vision/ws/btcusdt@trade", qb,
+             "binance"),
+        binance_writer(qb),
+        pump("wss://ws-live-data.polymarket.com", qr, "rtds",
+             subscribe=rtds_sub, ping_text="PING", ping_every=5),
+        rtds_writer(qr),
+        pump("wss://ws-subscriptions-clob.polymarket.com/ws/market", qc,
+             "clob", subscribe=clob_sub, ping_text="PING", ping_every=10,
+             resub_s=300),
+        clob_writer(qc),
+        refresh_assets(),
+    )
 
 
 if __name__ == "__main__":
