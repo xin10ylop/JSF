@@ -47,3 +47,4 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | VAC-cap | Vacuum ladder capacity (SIZE=1000/level) | train | +38.1c/sh unchanged; $9.5K/day, day-CI [$2.6K,$17.7K]; stake $368K/72d | CAPACITY ~10x base, no alpha decay |
 | VAC-queue | QUEUE=1000 vs 200 | train | identical results | queue-position IRRELEVANT - sweep-through fills; no speed race |
 | VAC-gate | FV_GATE=0.80 | train | +46.1c/sh, same $/day | tighter gate = purer, robust to gate choice |
+| VAC-hourly | Vacuum ladder on hourly family (both proportional and absolute-27s timing) | train | -2.7 to -5.6c/sh; only 0.10 level positive; 259-329 fills (10-20x thinner flow); day-CI includes zero | NO DETECTABLE EDGE on hourly - thin dump flow; 5m replication decisive |
