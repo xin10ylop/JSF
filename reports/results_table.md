@@ -44,3 +44,6 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | SBT-eg-offer | Sell leader at fv+margin, endgame | train | -1.0 to -1.8c/sh; offers landed at 0.95+ where takers are informed | NEGATIVE - wrong region |
 | GAP-DECOMP | Endgame favorite-buy prints by (price - model fair) | train | ALL alpha in gap>0.4: $1.03M vol, price 0.835 vs fv 0.068, fail 84.1%, maker +67.5c/sh = winning-side panic dumps into book vacuum; gap<-0.05 is poison (-20c) | THE POCKET = deep bids on the MODEL-WINNING side |
 | VAC-15m | Model-gated vacuum ladder (bids 0.10/0.20/0.30 on fv>=0.65 side, last 27s, q=200) | train 72d | +39.2c/sh, +190% on stake; win 58-62% at 10-30c levels; day-CI [$338,$1902]/day at 300sh/mkt sizing; top-5 days 86% | STRONG POSITIVE - to validate: 5m/hourly replication, test period, capacity |
+| VAC-cap | Vacuum ladder capacity (SIZE=1000/level) | train | +38.1c/sh unchanged; $9.5K/day, day-CI [$2.6K,$17.7K]; stake $368K/72d | CAPACITY ~10x base, no alpha decay |
+| VAC-queue | QUEUE=1000 vs 200 | train | identical results | queue-position IRRELEVANT - sweep-through fills; no speed race |
+| VAC-gate | FV_GATE=0.80 | train | +46.1c/sh, same $/day | tighter gate = purer, robust to gate choice |
