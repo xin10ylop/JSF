@@ -59,10 +59,18 @@ def main():
         age = np.where(ok, (gt - tts[idx.clip(0)]) / 1e6, np.nan)
         bmask = tbuy
         smask = ~tbuy
-        ia = np.searchsorted(tts[bmask], gt, side="right") - 1
-        ib = np.searchsorted(tts[smask], gt, side="right") - 1
-        ask = np.where(ia >= 0, tpx[bmask][ia.clip(0)], np.nan)
-        bid = np.where(ib >= 0, tpx[smask][ib.clip(0)], np.nan)
+        tb = tpx[bmask]
+        ts_ = tpx[smask]
+        if len(tb):
+            ia = np.searchsorted(tts[bmask], gt, side="right") - 1
+            ask = np.where(ia >= 0, tb[ia.clip(0)], np.nan)
+        else:
+            ask = np.full(len(gt), np.nan)
+        if len(ts_):
+            ib = np.searchsorted(tts[smask], gt, side="right") - 1
+            bid = np.where(ib >= 0, ts_[ib.clip(0)], np.nan)
+        else:
+            bid = np.full(len(gt), np.nan)
 
         bsec = (gt // 1_000_000) - 1
         bi = np.searchsorted(bn_sec, bsec, side="right") - 1
