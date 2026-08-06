@@ -74,8 +74,8 @@ that both equal the real venue. Every row is a potential divergence between
 | Queue sensitivity | PASS: invariant |
 | Gate sensitivity (0.65/0.80) | PASS: both positive |
 | Hourly family | NO EDGE (thin flow) — excluded from deployment |
-| 5m family train | RUNNING |
-| Untouched TEST period (both families) | PENDING (single reveal, frozen params) |
+| 5m family train | PASS: +28.5c/sh, day-CI [$1157,$5645] |
+| Untouched TEST period (both families) | **FAIL: 15m -9.2c, 5m -5.7c/sh, CIs negative.** Weekly profile: all train profit from the Apr 20-May 10 crash episode. Strategy reclassified as unvalidated event harvester; see findings.md |
 | Live paper fills vs backtest expectations | RUNNING (bot live since 02:40 UTC) |
 | WS print completeness vs Telonex tape | SCHEDULED (after daily publish) |
 
