@@ -22,6 +22,25 @@ SPLIT_US = int(pd.Timestamp("2026-06-15").value // 1000)
 WIN_S = {"5m": 300, "15m": 900, "4h": 14400, "hourly": 3600}
 
 
+
+def iter_tapes(fam):
+    """Yield (slug, tape_df) across a single parquet or a _parts directory."""
+    import glob as _g
+    import os as _os
+    import pandas as _pd
+    pdir = f"data/consolidated/{fam}_parts"
+    if _os.path.isdir(pdir):
+        for p in sorted(_g.glob(f"{pdir}/part_*.parquet")):
+            df = _pd.read_parquet(p)
+            df = df.sort_values(["slug", "timestamp_us"])
+            for slug, tape in df.groupby("slug"):
+                yield slug, tape
+    else:
+        df = _pd.read_parquet(f"data/consolidated/{fam}.parquet")
+        df = df.sort_values(["slug", "timestamp_us"])
+        for slug, tape in df.groupby("slug"):
+            yield slug, tape
+
 def run(horizon, use_test=False):
     fam = ("hourly_updown_trades" if horizon == "hourly"
            else f"updown_{horizon}_trades")
@@ -88,15 +107,11 @@ def run(horizon, use_test=False):
         gg = g[g.tau_s <= post_off_s].sort_values("tau_s").groupby("slug").last()
         fv_map = dict(zip(gg.index, gg.fv))
 
-    t = pd.read_parquet(f"data/consolidated/{fam}.parquet",
-                        columns=["timestamp_us", "slug", "price", "size",
-                                 "is_buy"])
-    t = t[t.slug.isin(res)]
-    t = t.sort_values(["slug", "timestamp_us"])
-
     post_off = int(post_frac * win * 1e6)
     fills = []
-    for slug, tape in t.groupby("slug"):
+    for slug, tape in iter_tapes(fam):
+        if slug not in res:
+            continue
         result = res[slug]
         t0 = t0s[slug]
         t_post = t0 + post_off

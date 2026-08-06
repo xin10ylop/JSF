@@ -14,6 +14,25 @@ GRID_STEP = {"5m": 5, "15m": 10, "4h": 60}
 WINDOW_S = {"5m": 300, "15m": 900, "4h": 14400}
 
 
+
+def iter_tapes(fam):
+    """Yield (slug, tape_df) across a single parquet or a _parts directory."""
+    import glob as _g
+    import os as _os
+    import pandas as _pd
+    pdir = f"data/consolidated/{fam}_parts"
+    if _os.path.isdir(pdir):
+        for p in sorted(_g.glob(f"{pdir}/part_*.parquet")):
+            df = _pd.read_parquet(p)
+            df = df.sort_values(["slug", "timestamp_us"])
+            for slug, tape in df.groupby("slug"):
+                yield slug, tape
+    else:
+        df = _pd.read_parquet(f"data/consolidated/{fam}.parquet")
+        df = df.sort_values(["slug", "timestamp_us"])
+        for slug, tape in df.groupby("slug"):
+            yield slug, tape
+
 def last_leq(sorted_ts, values, query_ts, max_age_us=None):
     idx = np.searchsorted(sorted_ts, query_ts, side="right") - 1
     ok = idx >= 0
@@ -33,11 +52,8 @@ def build(family: str):
     master = pd.read_parquet("data/master_updown.parquet")
     master = master[(master.horizon == horizon) & (master.result >= 0)
                     & master.strike.notna() & master.settle_px.notna()]
-    trades = pd.read_parquet(f"data/consolidated/{family}.parquet")
-    trades = trades.sort_values("timestamp_us")
-    have = set(trades.slug.unique())
-    master = master[master.slug.isin(have)].sort_values("t0_us").reset_index(drop=True)
-    print(f"{family}: {len(master)} resolved markets with tape+oracle")
+    mrows = {r.slug: r for r in master.itertuples()}
+    print(f"{family}: {len(mrows)} resolved markets with oracle strikes")
 
     cp = pd.read_parquet("data/telonex/chainlink_btcusd.parquet",
                          columns=["timestamp_us", "server_timestamp_us", "price_f"])
@@ -59,10 +75,9 @@ def build(family: str):
     bn_close = bn.close.values
 
     rows = []
-    tr_by_slug = dict(iter(trades.groupby("slug")))
-    for _, m in master.iterrows():
-        tape = tr_by_slug.get(m.slug)
-        if tape is None or len(tape) == 0:
+    for slug, tape in iter_tapes(family):
+        m = mrows.get(slug)
+        if m is None or len(tape) == 0:
             continue
         tts = tape.timestamp_us.values
         tpx = tape.price.values.astype("float64")
@@ -96,7 +111,7 @@ def build(family: str):
 
         n = len(gt)
         rec = {
-            "slug": np.repeat(m.slug, n),
+            "slug": np.repeat(slug, n),
             "t_us": gt,
             "tau_s": grid_off,
             "rem_s": win - grid_off,
