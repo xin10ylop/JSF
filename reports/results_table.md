@@ -41,3 +41,5 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | SBT-eg-join | Endgame join-the-touch longshot bid | train | -4.2 to -4.8c/sh; stale-tape chasing | NEGATIVE - wrong implementation of pocket |
 | SBT-ladder | Fixed deep-bid ladders 0.05-0.30 (last 90s / last 13.5s) | train | -6.7 / -6.5 c/sh; only 0.05 level positive | NEGATIVE - fixed levels sell favorites below fair |
 | DECOMP | Endgame pocket decomposition by mirror/aggressor | train | dumps into bids +3.9c (n=11K); favorite-chase passive side +14.8c (n=53K, fails 27.9% at 0.869!) | POCKET = SELLING THE CHASED LEADER ABOVE FAIR, not deep bids |
+| SBT-eg-offer | Sell leader at fv+margin, endgame | train | -1.0 to -1.8c/sh; offers landed at 0.95+ where takers are informed | NEGATIVE - wrong region |
+| GAP-DECOMP | Endgame favorite-buy prints by (price - model fair) | train | ALL alpha in gap>0.4: $1.03M vol, price 0.835 vs fv 0.068, fail 84.1%, maker +67.5c/sh = winning-side panic dumps into book vacuum; gap<-0.05 is poison (-20c) | THE POCKET = deep bids on the MODEL-WINNING side |
