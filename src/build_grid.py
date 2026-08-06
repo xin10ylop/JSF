@@ -132,7 +132,9 @@ def build(family: str):
         rows.append(pd.DataFrame(rec))
 
     grid = pd.concat(rows, ignore_index=True)
-    grid.to_parquet(f"data/grid_{horizon}.parquet", compression="zstd")
+    tmp = f"data/grid_{horizon}.parquet.tmp"
+    grid.to_parquet(tmp, compression="zstd")
+    __import__("os").replace(tmp, f"data/grid_{horizon}.parquet")
     print(f"grid_{horizon}: {len(grid)} rows, {grid.slug.nunique()} markets")
 
 
