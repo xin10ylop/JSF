@@ -85,7 +85,8 @@ class Bot:
                 ws = t0 + k * step
                 self.state.markets[slug] = MarketState(
                     slug, toks[0], ws * 1_000_000,
-                    (ws + step) * 1_000_000)
+                    (ws + step) * 1_000_000,
+                    asset_id_dn=toks[1] if len(toks) > 1 else None)
                 self.log_decision({"kind": "market_added", "slug": slug})
         # settle + drop expired markets (oracle end price known ~2s after t1)
         drop = []
@@ -106,10 +107,9 @@ class Bot:
                                    "result": result, "pnl": pnl})
 
     def _settle_result(self, m):
-        end = getattr(m, "end_px", None)
-        if end is None or m.strike is None:
+        if m.end_px is None or m.strike is None:
             return None
-        return 0 if end >= m.strike else 1
+        return 0 if m.end_px >= m.strike else 1
 
     # ---- feeds ---------------------------------------------------------
     async def binance_feed(self):
@@ -156,7 +156,7 @@ class Bot:
                             self.state.on_oracle(px, ts)
                             # capture end price for settling markets
                             for m in self.state.markets.values():
-                                if (not hasattr(m, "end_px")
+                                if (m.end_px is None
                                         and ts * 1000 >= m.t1_us):
                                     m.end_px = px
                     finally:
@@ -169,7 +169,11 @@ class Bot:
     async def clob_feed(self):
         url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
         while True:
-            ids = [m.asset_id_up for m in self.state.markets.values()]
+            ids = []
+            for m in self.state.markets.values():
+                ids.append(m.asset_id_up)
+                if m.asset_id_dn:
+                    ids.append(m.asset_id_dn)
             if not ids:
                 await asyncio.sleep(5)
                 continue
@@ -205,7 +209,18 @@ class Bot:
     def _on_clob(self, ev):
         et = ev.get("event_type")
         aid = ev.get("asset_id")
+        # map down-token events to the up-token view (mirrored semantics,
+        # matching the research tape: down trade at p == up trade at 1-p)
+        up_aid = aid
+        mirror = False
+        for m in self.state.markets.values():
+            if m.asset_id_dn == aid:
+                up_aid = m.asset_id_up
+                mirror = True
+                break
         if et == "book":
+            if mirror:
+                return  # book state tracked on the up token only
             bids = [(float(x["price"]), float(x["size"]))
                     for x in reversed(ev.get("bids", []))]
             asks = [(float(x["price"]), float(x["size"]))
@@ -214,8 +229,10 @@ class Bot:
         elif et == "last_trade_price":
             px = float(ev["price"])
             sz = float(ev.get("size", 0))
-            self.state.on_trade(aid, px, ev.get("timestamp"))
-            self.broker.on_trade_print(aid, px, sz, now_us())
+            if mirror:
+                px = 1.0 - px
+            self.state.on_trade(up_aid, px, ev.get("timestamp"))
+            self.broker.on_trade_print(up_aid, px, sz, now_us())
 
     # ---- decision loop -------------------------------------------------
     async def decide_loop(self):

@@ -81,13 +81,15 @@ class GzPricer:
 
 
 class MarketState:
-    __slots__ = ("slug", "asset_id_up", "t0_us", "t1_us", "strike",
-                 "bids", "asks", "last_trade_px", "last_trade_us",
-                 "book_us")
+    __slots__ = ("slug", "asset_id_up", "asset_id_dn", "t0_us", "t1_us",
+                 "strike", "bids", "asks", "last_trade_px", "last_trade_us",
+                 "book_us", "end_px")
 
-    def __init__(self, slug, asset_id_up, t0_us, t1_us):
+    def __init__(self, slug, asset_id_up, t0_us, t1_us, asset_id_dn=None):
         self.slug = slug
         self.asset_id_up = asset_id_up
+        self.asset_id_dn = asset_id_dn
+        self.end_px = None
         self.t0_us = t0_us
         self.t1_us = t1_us
         self.strike = None
