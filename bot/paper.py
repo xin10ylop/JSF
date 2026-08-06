@@ -1,0 +1,118 @@
+"""Paper broker: simulates maker/taker orders against the live feed with the
+same conservative fill rules as the backtest.
+
+Maker BUY at level L, size Q, posted at t:
+- a later trade print at price < L on the same asset fills the remainder
+  (price priority proves the level was swept),
+- a print exactly at L fills only beyond the displayed queue captured at
+  post time,
+- cancel stops all fills.
+
+Taker BUY: fills at the current best ask up to its displayed size, pays the
+0.07*p*(1-p) fee. Never assumes more size than displayed.
+
+All orders, fills, and settlements are logged as jsonl for reconciliation
+against the backtest.
+"""
+import json
+import os
+import time
+
+
+def now_us():
+    return int(time.time() * 1_000_000)
+
+
+class PaperBroker:
+    def __init__(self, log_path="logs/paper_fills.jsonl"):
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        self.log = open(log_path, "a")
+        self.orders = []          # open maker orders
+        self.positions = {}       # slug -> {"shares": s, "cost": c}
+        self.next_id = 1
+
+    def _emit(self, kind, **kw):
+        kw["kind"] = kind
+        kw["t_us"] = now_us()
+        self.log.write(json.dumps(kw, separators=(",", ":")) + "\n")
+        self.log.flush()
+
+    # ---- order entry ---------------------------------------------------
+    def maker_buy(self, slug, asset_id, side_label, level, size,
+                  queue_ahead, expire_us, meta=None):
+        oid = self.next_id
+        self.next_id += 1
+        self.orders.append(dict(
+            oid=oid, slug=slug, asset_id=asset_id, side=side_label,
+            level=level, size=size, remaining=size, queue=queue_ahead,
+            expire_us=expire_us))
+        self._emit("order", oid=oid, slug=slug, side=side_label, level=level,
+                   size=size, queue=queue_ahead, expire_us=expire_us,
+                   meta=meta or {})
+        return oid
+
+    def taker_buy(self, slug, side_label, ask_px, ask_sz, size, meta=None):
+        take = min(size, ask_sz)
+        if take <= 0 or ask_px is None:
+            return 0.0
+        fee = 0.07 * ask_px * (1 - ask_px)
+        pos = self.positions.setdefault(
+            (slug, side_label), {"shares": 0.0, "cost": 0.0})
+        pos["shares"] += take
+        pos["cost"] += take * (ask_px + fee)
+        self._emit("taker_fill", slug=slug, side=side_label, px=ask_px,
+                   shares=take, fee_per_sh=fee, meta=meta or {})
+        return take
+
+    def cancel_all(self, slug=None):
+        for o in self.orders:
+            if slug is None or o["slug"] == slug:
+                o["remaining"] = 0
+        self.orders = [o for o in self.orders if o["remaining"] > 0]
+
+    # ---- feed-driven fill simulation ----------------------------------
+    def on_trade_print(self, asset_id, price, size, t_us):
+        """Trade prints drive maker fills. Price is in Up-token terms; an
+        order on side 'Down' at level L maps to Up-print at 1-L."""
+        for o in self.orders:
+            if o["remaining"] <= 0 or t_us > o["expire_us"]:
+                continue
+            if o["asset_id"] != asset_id:
+                continue
+            lvl = o["level"] if o["side"] == "Up" else 1 - o["level"]
+            hit = price < lvl - 1e-9 if o["side"] == "Up" \
+                else price > lvl + 1e-9
+            at = abs(price - lvl) <= 1e-9
+            fill = 0.0
+            if hit:
+                fill = min(o["remaining"], size)
+            elif at:
+                beyond = max(0.0, size - o["queue"])
+                o["queue"] = max(0.0, o["queue"] - size)
+                fill = min(o["remaining"], beyond)
+            if fill > 0:
+                o["remaining"] -= fill
+                pos = self.positions.setdefault(
+                    (o["slug"], o["side"]), {"shares": 0.0, "cost": 0.0})
+                pos["shares"] += fill
+                pos["cost"] += fill * o["level"]
+                self._emit("maker_fill", oid=o["oid"], slug=o["slug"],
+                           side=o["side"], px=o["level"], shares=fill)
+        self.orders = [o for o in self.orders
+                       if o["remaining"] > 0 and t_us <= o["expire_us"]]
+
+    # ---- settlement ----------------------------------------------------
+    def settle(self, slug, result):
+        """result: 0 = Up won, 1 = Down won."""
+        pnl = 0.0
+        for (s, side), pos in list(self.positions.items()):
+            if s != slug or pos["shares"] <= 0:
+                continue
+            won = (side == "Up" and result == 0) or \
+                  (side == "Down" and result == 1)
+            payoff = pos["shares"] * (1.0 if won else 0.0)
+            pnl += payoff - pos["cost"]
+            self._emit("settle", slug=slug, side=side, shares=pos["shares"],
+                       cost=pos["cost"], payoff=payoff, won=won)
+            del self.positions[(s, side)]
+        return pnl
