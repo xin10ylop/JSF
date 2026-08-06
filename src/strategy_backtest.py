@@ -81,16 +81,39 @@ def run(horizon, edge_min=0.03, ttl_s=20.0, use_test=False):
         if pocket == "early_fav":
             ph = g[g.tau_s <= 0.33 * win_s]
             lo, hi = 0.70, 0.97
+        elif pocket == "endgame_offer":
+            # sell the leader above model fair in the last seconds:
+            # economically a sibling buy at 1-L; fills when chasers lift L.
+            margin = float(os.environ.get("MARGIN", 0.05))
+            ph = g[(g.tau_s >= float(os.environ.get("EG_FRAC", 0.985))
+                    * win_s)].copy()
+            # Up is leader: offer Up at L >= fv+margin (>= current ask)
+            up_lead = ph[(ph.fv >= 0.5)].copy()
+            L_up = np.maximum(up_lead.fv + margin,
+                              up_lead.ask_tape).clip(upper=0.99)
+            up_lead["side"] = "Down"        # we END UP long Down at 1-L
+            up_lead["level"] = 1 - L_up     # sibling-equivalent entry
+            # Down is leader: offer Down at Ld >= (1-fv)+margin
+            dn_lead = ph[(ph.fv < 0.5)].copy()
+            L_dn = np.maximum((1 - dn_lead.fv) + margin,
+                              1 - dn_lead.bid_tape).clip(upper=0.99)
+            dn_lead["side"] = "Up"          # long Up at 1-L_dn
+            dn_lead["level"] = 1 - L_dn
+            sig = pd.concat([up_lead, dn_lead], ignore_index=True)
+            sig = sig[(sig.level >= 0.01) & (sig.level <= 0.45)]
+            up_sig = sig[sig.side == "Up"]
+            dn_sig = sig[sig.side == "Down"]
         else:  # endgame_long: bid for abandoned longshots, last 1.5%
             ph = g[g.tau_s >= 0.985 * win_s]
             lo, hi = 0.03, 0.30
-        up_sig = ph[(ph.bid_tape >= lo) & (ph.bid_tape <= hi)].copy()
-        up_sig["side"] = "Up"
-        up_sig["level"] = up_sig.bid_tape
-        dn_bid = 1 - ph.ask_tape
-        dn_sig = ph[(dn_bid >= lo) & (dn_bid <= hi)].copy()
-        dn_sig["side"] = "Down"
-        dn_sig["level"] = 1 - dn_sig.ask_tape
+        if pocket != "endgame_offer":
+            up_sig = ph[(ph.bid_tape >= lo) & (ph.bid_tape <= hi)].copy()
+            up_sig["side"] = "Up"
+            up_sig["level"] = up_sig.bid_tape
+            dn_bid = 1 - ph.ask_tape
+            dn_sig = ph[(dn_bid >= lo) & (dn_bid <= hi)].copy()
+            dn_sig["side"] = "Down"
+            dn_sig["level"] = 1 - dn_sig.ask_tape
     sig = pd.concat([up_sig, dn_sig], ignore_index=True)
     sig = sig.sort_values(["slug", "t_us"])
     print(f"signals: {len(sig)} at {sig.slug.nunique()} markets "
