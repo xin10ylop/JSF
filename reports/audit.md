@@ -97,3 +97,22 @@ Measured 2026-08-06 against the published Aug-5 tape:
 - Definitive ratio vs the Aug-6 tape: scheduled for the next publication
   cycle. Paper-bot fills logged before 2026-08-06 03:00 UTC should be
   treated as unreliable (broken feed); fills after are on the fixed feed.
+
+## H. Closeout status (2026-08-07)
+
+- **Definitive per-market ws/tape ratio: BLOCKED on API quota.** The Telonex
+  key hit its download limit (~290K files pulled for the research corpus).
+  Procedure when quota resets: download trades for 2026-08-06 slugs
+  btc-updown-15m-1786012200 / -1786013100 (+ overlapping 5m windows),
+  restrict to the recorder-covered span 10:38:26-10:50:10 UTC, compare
+  per-asset print counts/sizes vs data/live/clob/2026-08-06_10.jsonl
+  (Up direct, Down mirrored 1-p). Standing evidence meanwhile: new-feed
+  event volumes are consistent with full capture (S.G above).
+- **Paper loop verified end-to-end on the fixed feed** (since 03:00 Aug 6):
+  42 ladder orders, 38 maker fills from real prints, 3 settlements against
+  the oracle; net paper P&L +$250 (one +$240 vacuum catch, one +$70, one
+  -$60 full-ladder loss). Three settlements demonstrate the mechanics work;
+  they say nothing about expectancy.
+- **Operational note**: this research container restarts frequently and
+  kills the processes; continuous measurement belongs on the droplet
+  (deploy/droplet_setup.sh, systemd auto-restart).
