@@ -59,3 +59,18 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | H1-5m | Paper rule on 5m family | train, 19,865 trades | -2.28c/sh [CI -2.97,-1.63] | CONFIRMS: loses harder on 5m |
 | H15-5m | Estimator race 5m | 1.39M pts | market beats G/Phi every phase (final 0.0444 vs 0.0574) | CONFIRMS market sharpness |
 | FLB-above | Above family FLB | 25 usable snapshot-mkts | n too small; family illiquid | CLOSED |
+
+## Round 2 — "think outside the box" pass (2026-08-09)
+
+| # | Hypothesis / test | Data | Result | Status |
+|---|---|---|---|---|
+| H31 | PRE-WINDOW mispricing: for updown, strike=spot at t0, so fair should be exactly 0.50 before open. Never examined — all prior grids started at tau>=0 | 6.0M pre-window prints, $130M notional, 68K mkts | Identity is FALSE empirically: P(Up) tracks traded price almost exactly (px 0.44->43.3%, 0.53->53.3%, 0.61->63.2%; gap ~0 in every bucket). Pre-window market is calibrated | REJECTED — venue efficient pre-open |
+| H31b | Pre-window under-reaction (gaps +/-8pp at the extremes) traded as taker | train+test both families | -1.0 to -2.9c/sh; fee+spread eats it | NEGATIVE |
+| H31c | Same as maker on favored side, causal signal, real fill sim | 322K fills train / 66K test | 5m +0.72c train/+2.90c test; 15m +2.04 train/-2.36 test; ALL CIs span zero | NOT VALIDATED |
+| H32 | Timestamp artifact check on pre-window prints | receipt clock vs exchange clock | lag 0.0s, 0.000% inside window — prints are genuinely pre-open | CLEAN (no artifact) |
+| H33 | WINDOW-OPEN structural moneyness: oracle lags Binance ~2-3.5s, so the strike is a stale price and the window opens already ITM by a knowable amount | 34K (5m) + 11K (15m) mkts | Mean model-vs-market gap at open = 4.0c. Assumed-fill maker: +1.60c test 5m CI[+0.59,+3.11], +3.18c test 15m CI[+0.58,+5.18] — CIs exclude zero | PROMISING until fills simulated |
+| H33b | Same with REAL fill simulation (print must sweep our level) + anti-side null | same | Collapses to -1.99 to -3.28c/sh; fill rate 85% (you fill exactly when price runs through you). Model side beats anti side consistently (model has information) but both lose | NEGATIVE — adverse selection, same as every other maker test |
+| H34 | Maker rebate economics (never credited before) | live venue config | `feeSchedule.rebateRate = 0.2` -> maker earns 0.2*0.07*p(1-p) = max 0.35c/sh. `rewardsMaxSpread=1.5, rewardsMinSize=50` exist but NO clobRewards pool attached to these markets | REAL BUT SMALL — 0.35c cannot offset 2-3c adverse selection |
+| H35 | Endgame taker in the near-zero-fee zone (ask>=0.90, fee ~0.5c), 300ms latency penalty | Jun-Aug, 8.1M quote obs | 5m test +0.67c/sh CI[-0.98,+2.12]; 15m test +0.07c CI spans 0. **Median available size = 9-10 shares** | CAPACITY-DEAD (~$2/day) |
+| **H36** | **SETTLEMENT RULE CHANGE**: on 2026-08-07 all 384 markets/day switched description from "price at the end of the range" to "time-weighted average price (TWAP) of the range" | markets dataset, 100% sharp changeover | **Wording change CONFIRMED.** Outcome data (Binance proxy): END-rule still correct 79.2% on rule-disagreement markets (n=106) vs 87.6% pre-baseline -> does NOT support a math change. BUT full-sample END match fell 0.954 -> 0.897 (n=766, ~5 sigma) | **OPEN — something changed, not identified** |
+| H36b | Prize if settlement IS average-based | real BTC paths, 23K windows | At 95% through a window: correct (TWAP) model Brier **0.0021** vs terminal model 0.108 vs market's historical final-phase 0.042. |Δ|>25pp in 19% of cases | QUANTIFIED — large if H36 resolves as TWAP |
