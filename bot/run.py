@@ -24,7 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.state import BotState, MarketState, now_us  # noqa: E402
 from bot.paper import PaperBroker  # noqa: E402
 from bot.risk import Risk  # noqa: E402
-from bot.strategy import GzValueMaker, ExtremeTaker, VacuumLadder  # noqa: E402
+from bot.strategy import (GzValueMaker, ExtremeTaker, VacuumLadder,  # noqa: E402
+                          RollAvgEdge)
 
 GAMMA = "https://gamma-api.polymarket.com/markets"
 CFG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -42,7 +43,9 @@ class Bot:
         self.broker = PaperBroker()
         self.risk = Risk(cfg.get("risk", {}))
         self.strategies = []
-        if cfg.get("vacuum_ladder", {}).get("enabled", True):
+        if cfg.get("rollavg_edge", {}).get("enabled", True):
+            self.strategies.append(RollAvgEdge(cfg.get("rollavg_edge", {})))
+        if cfg.get("vacuum_ladder", {}).get("enabled", False):
             self.strategies.append(VacuumLadder(cfg.get("vacuum_ladder", {})))
         if cfg.get("gz_maker", {}).get("enabled", False):
             self.strategies.append(GzValueMaker(cfg.get("gz_maker", {})))

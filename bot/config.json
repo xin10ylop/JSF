@@ -29,7 +29,7 @@
     "size": 100
   },
   "vacuum_ladder": {
-    "enabled": true,
+    "enabled": false,
     "window_s": 27,
     "fv_gate": 0.65,
     "levels": [
@@ -38,5 +38,13 @@
       0.3
     ],
     "size": 100
-  }
+  },
+  "rollavg_edge": {
+    "enabled": true,
+    "window_s": 45,
+    "edge_min": 0.08,
+    "size": 100,
+    "max_price": 0.97
+  },
+  "_note": "Settlement changed 2026-08-07 to rolling-average (w=30s/60s). vacuum_ladder disabled: it exploited last-second spikes, which the new rule neutralises."
 }

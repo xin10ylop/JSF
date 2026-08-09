@@ -81,11 +81,20 @@ class GzPricer:
 
 
 class MarketState:
+    """Post-2026-08-07 contract: Up iff mean(P,[T-w,T]) >= mean(P,[0,w]),
+    w = 30s (5m markets) / 60s (15m). We accumulate the oracle tick stream
+    into the strike average and the settlement average."""
+
     __slots__ = ("slug", "asset_id_up", "asset_id_dn", "t0_us", "t1_us",
                  "strike", "bids", "asks", "last_trade_px", "last_trade_us",
-                 "book_us", "end_px")
+                 "book_us", "end_px", "w", "k_sum", "k_n", "r_sum", "r_n",
+                 "last_oracle_px")
 
     def __init__(self, slug, asset_id_up, t0_us, t1_us, asset_id_dn=None):
+        self.w = 30.0 if (t1_us - t0_us) <= 300_000_000 else 60.0
+        self.k_sum = 0.0; self.k_n = 0        # strike window [t0, t0+w]
+        self.r_sum = 0.0; self.r_n = 0        # settle window [t1-w, t1]
+        self.last_oracle_px = None
         self.slug = slug
         self.asset_id_up = asset_id_up
         self.asset_id_dn = asset_id_dn
@@ -98,6 +107,21 @@ class MarketState:
         self.last_trade_px = None
         self.last_trade_us = 0
         self.book_us = 0
+
+    def on_oracle_tick(self, px, round_ts_us):
+        """Accumulate the two averages that define the contract."""
+        self.last_oracle_px = px
+        if self.t0_us <= round_ts_us < self.t0_us + int(self.w * 1e6):
+            self.k_sum += px; self.k_n += 1
+        if self.t1_us - int(self.w * 1e6) <= round_ts_us < self.t1_us:
+            self.r_sum += px; self.r_n += 1
+
+    def strike_avg(self):
+        """Known once w seconds of the window have elapsed."""
+        return self.k_sum / self.k_n if self.k_n else None
+
+    def settle_avg_so_far(self):
+        return (self.r_sum, self.r_n)
 
     def best_bid(self):
         return self.bids[0] if self.bids else (None, 0.0)
@@ -130,10 +154,10 @@ class BotState:
         self.oracle_px = price
         self.oracle_round_ts_us = round_ts_ms * 1000
         self.oracle_us = now_us()
-        # capture strikes for any market whose t0 this round crosses
         for m in self.markets.values():
+            m.on_oracle_tick(price, self.oracle_round_ts_us)
             if m.strike is None and self.oracle_round_ts_us >= m.t0_us:
-                m.strike = price
+                m.strike = price          # legacy field, kept for logging
 
     def on_book(self, asset_id, bids, asks, ts_ms):
         for m in self.markets.values():
@@ -159,12 +183,34 @@ class BotState:
         return self.binance_px * ratio
 
     def fair(self, m: MarketState, t_us=None):
+        """Fair value of the CURRENT (rolling-average) contract."""
+        import sys as _s, os as _o
+        _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.dirname(
+            _o.path.abspath(__file__))), "src"))
+        from rollavg_pricer import fair as _fair
+        t_us = t_us or now_us()
+        T = (m.t1_us - m.t0_us) / 1e6
+        t = (t_us - m.t0_us) / 1e6
+        K = m.strike_avg()
+        spot = self.spot_adj()
+        if K is None or spot is None or t < m.w or t >= T:
+            return None                      # strike not yet formed / expired
+        if self.vol.var is None or self.vol.var <= 0:
+            return None
+        sigma = (self.vol.var ** 0.5) * spot     # dollar vol per sqrt(sec)
+        r_sum, r_n = m.settle_avg_so_far()
+        R = float(r_sum)                          # price-seconds (1 tick/sec)
+        return float(_fair(spot, K, R, T, t, m.w, sigma))
+
+    def fair_legacy(self, m: MarketState, t_us=None):
+        """Pre-2026-08-07 pricer — kept ONLY to measure market adaptation."""
         t_us = t_us or now_us()
         rem_s = (m.t1_us - t_us) / 1e6
         spot = self.spot_adj()
-        if m.strike is None or spot is None or rem_s <= 0:
+        K = m.strike_avg() or m.strike
+        if K is None or spot is None or rem_s <= 0:
             return None
-        return self.pricer.fair(spot, m.strike, self.vol.var, rem_s)
+        return self.pricer.fair(spot, K, self.vol.var, rem_s)
 
     def staleness(self):
         t = now_us()

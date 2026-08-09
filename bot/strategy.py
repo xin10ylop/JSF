@@ -121,3 +121,53 @@ class ExtremeTaker:
                         "avail": bbs, "size": self.size,
                         "reason": f"fairD {fair_dn:.3f} vs askD {ask_dn:.3f}"}
         return None
+
+
+class RollAvgEdge:
+    """Post-2026-08-07 contract edge monitor / trader.
+
+    The venue changed settlement on 2026-08-07 to
+        Up iff mean(P,[T-w,T]) >= mean(P,[0,w]),  w=30s (5m) / 60s (15m).
+    Any book still priced on the old terminal rule is systematically wrong
+    in the back of the window: measured on real BTC paths, at 5s left the
+    correct pricer scores Brier 0.0026 vs 0.0449 for the legacy pricer,
+    with p90 disagreement of 22pp.
+
+    This emits a signal when |correct_fair - market| clears `edge_min` in
+    the final `window_s`. It ALWAYS logs the gap (even when not trading) so
+    that paper mode measures whether the market has adapted to the new rule.
+    """
+
+    def __init__(self, cfg):
+        self.window_s = cfg.get("window_s", 45)
+        self.edge_min = cfg.get("edge_min", 0.08)
+        self.size = cfg.get("size", 100)
+        self.max_price = cfg.get("max_price", 0.97)
+        self.observations = []
+
+    def evaluate(self, state, m, t_us):
+        rem = (m.t1_us - t_us) / 1e6
+        if rem > self.window_s or rem <= 1.0:
+            return None
+        fv = state.fair(m, t_us)
+        if fv is None:
+            return None
+        legacy = state.fair_legacy(m, t_us)
+        bb, bbs = m.best_bid()
+        ba, bas = m.best_ask()
+        if bb is None or ba is None or not (0 < bb < ba < 1):
+            return None
+        mid = (bb + ba) / 2
+        self.observations.append((m.slug, rem, mid, fv, legacy))
+        # buy Up at ask when the correct pricer says the ask is cheap
+        if fv - ba >= self.edge_min and ba <= self.max_price:
+            return {"action": "taker_buy", "side": "Up", "px": ba,
+                    "avail": bas, "size": self.size,
+                    "reason": f"rollavg fv {fv:.3f} vs ask {ba:.3f} "
+                              f"(legacy {legacy if legacy is None else round(legacy,3)}) rem {rem:.0f}s"}
+        ask_dn = 1 - bb
+        if (1 - fv) - ask_dn >= self.edge_min and ask_dn <= self.max_price:
+            return {"action": "taker_buy", "side": "Down", "px": ask_dn,
+                    "avail": bbs, "size": self.size,
+                    "reason": f"rollavg fvD {1-fv:.3f} vs askD {ask_dn:.3f} rem {rem:.0f}s"}
+        return None

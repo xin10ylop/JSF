@@ -1,5 +1,23 @@
 # Findings: Polymarket Short-Dated BTC Binaries
 
+> **CRITICAL UPDATE 2026-08-09 — the contract changed underneath this entire
+> study.** On 2026-08-07 Polymarket switched settlement of the 5m/15m crypto
+> up-down markets from two instantaneous prices to a **rolling average**:
+> Up iff mean(P over last w sec) >= mean(P over first w sec), with w = 30s
+> (5m) / 60s (15m), across BTC/ETH/SOL/XRP/DOGE. Verified here: on markets
+> where the old and new rules disagree, the old rule was correct 80.5%
+> before the change and 49.1% after — it stopped governing.
+>
+> Consequences: (1) every model in this report, and in the Semenas paper,
+> prices the OLD contract; (2) the correct pricer scores Brier 0.0026 at 5s
+> left versus 0.0449 for a legacy pricer (17x) and 0.042 for the market
+> historically; (3) the vacuum-ladder finding is structurally dead — it
+> harvested last-second spikes, which an average neutralises. Correct
+> pricer: src/rollavg_pricer.py. Whether the venue's book has adapted is
+> unmeasured (all price data here predates the change) and is what the
+> paper bot is now instrumented to answer.
+
+
 Final report (data pipeline coverage: Oct 2025 - Aug 2026; five BTC
 families; ~120K resolved markets; Chainlink settlement feed at 1s; Binance
 at 1s/100ms; 3,000-market book sample; live recorder + paper bot running).
