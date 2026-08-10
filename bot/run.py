@@ -163,12 +163,28 @@ class Bot:
                 await asyncio.sleep(2)
 
     async def rtds_feed(self):
+        """Chainlink oracle feed.
+
+        MUST have a receive timeout. `async for msg in ws` blocks forever if
+        the server stops sending without closing the socket -- no exception,
+        no reconnect, and the bot runs on a frozen oracle. Observed live: the
+        newest round went 601s stale while the process looked perfectly
+        healthy, and the stale strike against a live spot manufactured fake
+        signals that cost -$162 of paper P&L in one bucket.
+
+        Three defences: a recv timeout, a periodic forced reconnect, and a
+        watchdog on the age of the newest ROUND (not merely of receipt --
+        the feed can keep sending heartbeats while the round is stuck).
+        """
         url = "wss://ws-live-data.polymarket.com"
         sub = {"action": "subscribe", "subscriptions": [
             {"topic": "crypto_prices_chainlink", "type": "*"}]}
+        RECV_TIMEOUT_S = 15
+        CYCLE_S = 600
+        MAX_ROUND_AGE_S = 60
         while True:
             try:
-                async with websockets.connect(url) as ws:
+                async with websockets.connect(url, ping_interval=None) as ws:
                     await ws.send(json.dumps(sub))
 
                     async def pinger():
@@ -176,8 +192,11 @@ class Bot:
                             await asyncio.sleep(5)
                             await ws.send("PING")
                     pt = asyncio.create_task(pinger())
+                    t_end = time.time() + CYCLE_S
                     try:
-                        async for msg in ws:
+                        while time.time() < t_end:
+                            msg = await asyncio.wait_for(
+                                ws.recv(), timeout=RECV_TIMEOUT_S)
                             if msg == "PONG":
                                 continue
                             try:
@@ -190,13 +209,23 @@ class Bot:
                             px = float(pay["value"])
                             ts = int(pay["timestamp"])
                             self.state.on_oracle(px, ts)
-                            # capture end price for settling markets
                             for m in self.state.markets.values():
                                 if (m.end_px is None
                                         and ts * 1000 >= m.t1_us):
                                     m.end_px = px
+                            # the socket is live but the ROUND may be stuck
+                            if self.state.oracle_age_s() > MAX_ROUND_AGE_S:
+                                self.log_decision({
+                                    "kind": "rtds_round_stale",
+                                    "age_s": round(
+                                        self.state.oracle_age_s(), 1)})
+                                break
                     finally:
                         pt.cancel()
+            except asyncio.TimeoutError:
+                self.log_decision({"kind": "rtds_silent",
+                                   "note": f"no msg in {RECV_TIMEOUT_S}s, "
+                                           "reconnecting"})
             except Exception as e:  # noqa: BLE001
                 self.log_decision({"kind": "feed_err", "feed": "rtds",
                                    "err": str(e)[:100]})
