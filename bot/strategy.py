@@ -186,14 +186,26 @@ class RollAvgEdge:
         if fv is None or z is None:
             return None
         self.f["priced"] += 1
+        # Require only what each side actually needs to trade.
+        #
+        # This used to demand a two-sided Up book (`bb and ba and 0<bb<ba<1`)
+        # before considering EITHER side. In the settle window a near-decided
+        # market routinely goes one-sided -- the losing token loses its bid
+        # and quotes 0.001 -- which is exactly when we want to buy the OTHER
+        # token, whose own book is fine. Measured live: 48 of 48 priced
+        # evaluations were rejected here, i.e. 100% of signals.
         bb, bbs = m.best_bid()
         ba, bas = m.best_ask()
-        if bb is None or ba is None or not (0 < bb < ba < 1):
+        ask_up = ba if (ba is not None and 0 < ba < 1) else None
+        ad, dn_sz, dn_src = m.best_ask_dn()
+        ask_dn = ad if (ad is not None and 0 < ad < 1) else None
+        if ask_up is None and ask_dn is None:
             return None
         self.f["book"] += 1
         if abs(z) >= self.zmin:
             self.f["z_pass"] += 1
-        self.observations.append((m.slug, rem, (bb + ba) / 2, fv, z,
+        mid = ((bb + ba) / 2) if (bb is not None and ba is not None) else None
+        self.observations.append((m.slug, rem, mid, fv, z,
                                   state.fair_legacy(m, t_us)))
         last = self.last_fire.get(m.slug)
         if last is not None and (t_us - last) < self.cooldown_s * 1e6:
@@ -213,9 +225,12 @@ class RollAvgEdge:
         def ev_of(fair, ask):
             return fair - ask - 0.07 * ask * (1 - ask)
 
-        if abs(z) >= self.zmin and min(ba, 1 - bb) <= self.max_price:
+        cands = [p for p in (ask_up if z > 0 else None,
+                             ask_dn if z < 0 else None) if p is not None]
+        if abs(z) >= self.zmin and cands and min(cands) <= self.max_price:
             self.f["px_pass"] += 1
-        if z >= self.zmin and ba <= self.max_price:
+        if z >= self.zmin and ask_up is not None and ask_up <= self.max_price:
+            ba = ask_up
             if self.require_edge and fv - ba < self.edge_min:
                 return None
             self.f["fired"] += 1
@@ -225,10 +240,8 @@ class RollAvgEdge:
                     "ev_est": round(ev_of(fv, ba), 4), "z": round(z, 2),
                     "reason": f"rollavg z={z:+.2f} emp_fair {fv:.3f} vs ask "
                               f"{ba:.3f} rem {rem:.0f}s"}
-        ask_dn, dn_sz, dn_src = m.best_ask_dn()
-        if ask_dn is None:
-            return None
-        if z <= -self.zmin and ask_dn <= self.max_price:
+        if z <= -self.zmin and ask_dn is not None \
+                and ask_dn <= self.max_price:
             if self.require_edge and (1 - fv) - ask_dn < self.edge_min:
                 return None
             self.f["fired"] += 1
