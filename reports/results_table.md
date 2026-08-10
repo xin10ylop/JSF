@@ -143,3 +143,12 @@ tradeable. There is no maker fallback.
 
 Gap this closed: the headline measurement globbed `*_5m_*` only, so the bot
 was trading an unvalidated family until this ran.
+
+| # | Hypothesis | Result | Verdict |
+|---|---|---|---|
+| H53 | max_price=0.97 is leaving the reachable edge on the table | The 0.985-0.990 band holds **1.22M of 2.6M** qualifying shares at **+0.57c/share** (hit 0.996, fee only 0.07c) vs **-0.64c** pre-change. Raising the cap 0.97->0.99: shares/day 353K->889K, markets/day 367->862, pool $26.0K->$29.3K, blended EV 7.37c->3.30c | **CONFIRMED — cap raised.** It was the binding constraint on px_pass (2.3% live), and it was self-imposed |
+
+Caution recorded: at ~0.9875 the payoff is ~79:1 against (lose 98.75c, win 1.25c).
+EV survives a hit rate down to ~0.990 and turns negative below ~0.985, so the
+margin for model error is ~1pp of hit rate. The per-market DOLLAR cap, not the
+share cap, is what bounds the tail; set to $150.
