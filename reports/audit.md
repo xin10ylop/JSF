@@ -409,3 +409,32 @@ real defects than any amount of re-reading the backtest would have.
     `best_ask_dn()` uses the real Down ask, falling back to the mirror only
     when the Down book is absent, tagging which was used (`dn_src`) so the
     two can be compared in the fill log.
+
+### I.11 The bot was blind to 97% of book changes
+
+19. **Only `book` snapshots were handled; `price_change` deltas were
+    dropped.** A live sample of the CLOB market channel:
+
+        price_change      14,750   97.2%
+        book                 282    1.9%
+        last_trade_price     136    0.9%
+
+    `_on_clob` acted only on `event_type == "book"`, so the maintained order
+    book was refreshed on 1.9% of messages and was stale in between --
+    and the event-driven evaluation fired on that same 1.9%. This strategy
+    exists to catch transient dips from ~0.99 to 0.87-0.92, and those dips
+    arrive as deltas. The bot could not see them.
+
+    This is the best explanation yet for `px_pass` near zero: the bot was
+    reading a stale book that mostly showed 0.99, then correctly declining.
+    It was not the market being efficient; it was the bot being blind.
+
+    `MarketState` now keeps `{price: size}` level maps per token per side,
+    `set_book` replaces them on a snapshot and `apply_delta` applies each
+    `price_changes` entry (size 0 removes the level), with the top of book
+    re-derived after every change. Both tokens are maintained. Regression
+    tests in `reconcile_bot.py` cover improve-ask, pull-level, improve-bid
+    and the down-token path.
+
+Bug tally: 19. This one gates the entire result: every px_pass measurement
+before it was taken against a book the bot was only sampling 1.9% of.

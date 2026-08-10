@@ -321,29 +321,26 @@ class Bot:
                 mirror = True
                 break
         if et == "book":
-            # Both tokens' books are kept: the Down side is taken by buying
-            # the Down token off its own ask, not by mirroring the Up bid.
-            # Polymarket orders levels worst-to-best; sort explicitly rather
-            # than relying on reversed()/as-sent order.
+            # Full snapshot: replace the level map for this token.
+            # Polymarket orders levels worst-to-best; sort explicitly.
             bids = sorted(((float(x["price"]), float(x["size"]))
                            for x in ev.get("bids", [])), key=lambda t: -t[0])
             asks = sorted(((float(x["price"]), float(x["size"]))
                            for x in ev.get("asks", [])), key=lambda t: t[0])
-            self.state.on_book(aid, bids, asks, ev.get("timestamp"))
-            if mirror:
-                aid = up_aid          # evaluate the market this book belongs to
-            # Evaluate IMMEDIATELY on a book change inside the settle window.
-            # The favoured side rests at ~0.99 most of the time and dips to
-            # 0.87-0.92 only in the instants around a trade; a 1s polling
-            # loop walks past most of those. Measured take rate on recorded
-            # books with 1s polling was 1 market in 17.
-            for m in self.state.markets.values():
-                if m.asset_id_up != aid:
+            m = self.state.on_book(aid, bids, asks, ev.get("timestamp"))
+            self._maybe_eval(m)
+        elif et == "price_change":
+            # 97.2% of CLOB messages. Ignoring these leaves the book stale
+            # between the 1.9% that are snapshots -- and the dips this
+            # strategy trades arrive as deltas, so the bot never saw them.
+            for ch in ev.get("price_changes", []) or []:
+                try:
+                    m = self.state.on_price_change(
+                        str(ch.get("asset_id")), float(ch["price"]),
+                        float(ch["size"]), ch.get("side"))
+                except (TypeError, ValueError, KeyError):
                     continue
-                rem = (m.t1_us - now_us()) / 1e6
-                if 0 < rem <= m.w:
-                    self._try_market(m)
-                break
+                self._maybe_eval(m)
         elif et == "last_trade_price":
             px = float(ev["price"])
             sz = float(ev.get("size", 0))
@@ -457,6 +454,14 @@ class Bot:
                 "oracle_px": s.oracle_px, "spot_adj": s.spot_adj(),
                 "stale": {k: round(v, 1) for k, v in s.staleness().items()},
                 "detail": mk})
+
+    def _maybe_eval(self, m):
+        """Evaluate immediately if this market is inside its settle window."""
+        if m is None:
+            return
+        rem = (m.t1_us - now_us()) / 1e6
+        if 0 < rem <= m.w:
+            self._try_market(m)
 
     def _try_market(self, m):
         """Guarded wrapper: one market's failure must never stop the loop."""

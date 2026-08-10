@@ -155,7 +155,8 @@ class MarketState:
     __slots__ = ("slug", "asset_id_up", "asset_id_dn", "t0_us", "t1_us",
                  "strike", "bids", "asks", "last_trade_px", "last_trade_us",
                  "book_us", "end_px", "w", "k_fixed", "last_oracle_px",
-                 "bids_dn", "asks_dn", "book_dn_us")
+                 "bids_dn", "asks_dn", "book_dn_us",
+                 "lv_up", "lv_dn")
 
     def __init__(self, slug, asset_id_up, t0_us, t1_us, asset_id_dn=None):
         self.w = 30.0 if (t1_us - t0_us) <= 300_000_000 else 60.0
@@ -177,12 +178,46 @@ class MarketState:
         self.bids_dn = []
         self.asks_dn = []
         self.book_dn_us = 0
+        # Level maps {price: size} per token, per side, maintained from
+        # price_change DELTAS. 97.2% of CLOB messages are price_change and
+        # only 1.9% are full `book` snapshots, so a bot that reads snapshots
+        # alone is blind to almost every book change -- and this strategy
+        # lives entirely on transient dips that arrive as deltas.
+        self.lv_up = {"bid": {}, "ask": {}}
+        self.lv_dn = {"bid": {}, "ask": {}}
         self.last_trade_px = None
         self.last_trade_us = 0
         self.book_us = 0
 
     def on_oracle_tick(self, px, round_ts_us):
         self.last_oracle_px = px
+
+    def _rebuild(self, is_up):
+        lv = self.lv_up if is_up else self.lv_dn
+        bids = sorted(((p, sz) for p, sz in lv["bid"].items() if sz > 0),
+                      key=lambda t: -t[0])
+        asks = sorted(((p, sz) for p, sz in lv["ask"].items() if sz > 0),
+                      key=lambda t: t[0])
+        if is_up:
+            self.bids, self.asks = bids, asks
+        else:
+            self.bids_dn, self.asks_dn = bids, asks
+
+    def set_book(self, is_up, bids, asks):
+        lv = self.lv_up if is_up else self.lv_dn
+        lv["bid"] = {p: s for p, s in bids if s > 0}
+        lv["ask"] = {p: s for p, s in asks if s > 0}
+        self._rebuild(is_up)
+
+    def apply_delta(self, is_up, price, size, side):
+        """side: 'BUY' -> bid level, 'SELL' -> ask level. size 0 removes."""
+        lv = self.lv_up if is_up else self.lv_dn
+        book = lv["bid"] if side == "BUY" else lv["ask"]
+        if size > 0:
+            book[price] = size
+        else:
+            book.pop(price, None)
+        self._rebuild(is_up)
 
     def best_bid(self):
         return self.bids[0] if self.bids else (None, 0.0)
@@ -443,15 +478,27 @@ class BotState:
     def on_book(self, asset_id, bids, asks, ts_ms):
         for m in self.markets.values():
             if m.asset_id_up == asset_id:
-                m.bids = bids
-                m.asks = asks
+                m.set_book(True, bids, asks)
                 m.book_us = now_us()
-                return
+                return m
             if m.asset_id_dn == asset_id:
-                m.bids_dn = bids
-                m.asks_dn = asks
+                m.set_book(False, bids, asks)
                 m.book_dn_us = now_us()
-                return
+                return m
+        return None
+
+    def on_price_change(self, asset_id, price, size, side):
+        """Apply one level delta. 97% of CLOB traffic arrives this way."""
+        for m in self.markets.values():
+            if m.asset_id_up == asset_id:
+                m.apply_delta(True, price, size, side)
+                m.book_us = now_us()
+                return m
+            if m.asset_id_dn == asset_id:
+                m.apply_delta(False, price, size, side)
+                m.book_dn_us = now_us()
+                return m
+        return None
 
     def on_trade(self, asset_id, price, ts_ms):
         for m in self.markets.values():

@@ -229,6 +229,28 @@ def main():
         "fired on an ask richer than max_price"
     print("PASS: book gate trades the live side, refuses empty/rich books")
 
+    # ---- book must track price_change DELTAS, not just snapshots --------
+    # 97.2% of CLOB messages are price_change and 1.9% are `book`. A bot
+    # that reads snapshots only is blind to nearly every book change, and
+    # this strategy trades transient dips that arrive as deltas.
+    sd = BotState()
+    sd.oracle_hist.clear()
+    t0d = (int(time.time()) // 300) * 300
+    md = MarketState("delta-5m", "up", t0d * 1_000_000,
+                     (t0d + 300) * 1_000_000, asset_id_dn="dn")
+    sd.markets[md.slug] = md
+    sd.on_book("up", [(0.90, 100.0)], [(0.93, 200.0)], None)
+    assert md.best_ask()[0] == 0.93
+    sd.on_price_change("up", 0.92, 150.0, "SELL")
+    assert md.best_ask() == (0.92, 150.0), "delta did not improve the ask"
+    sd.on_price_change("up", 0.92, 0.0, "SELL")
+    assert md.best_ask()[0] == 0.93, "pulled level not removed"
+    sd.on_price_change("up", 0.91, 75.0, "BUY")
+    assert md.best_bid() == (0.91, 75.0), "delta did not improve the bid"
+    sd.on_price_change("dn", 0.05, 300.0, "SELL")
+    assert md.best_ask_dn()[:2] == (0.05, 300.0), "down book not tracked"
+    print("PASS: order book tracks price_change deltas, both tokens")
+
     print("\nALL RECONCILIATION CHECKS PASSED")
 
 
