@@ -1,20 +1,36 @@
 """Pricer for the post-2026-08-07 btc-updown contract.
 
 RULE (effective 2026-08-07, all coins: BTC/ETH/SOL/XRP/DOGE):
-    Up  iff  mean(P over [T-w, T])  >=  mean(P over [0, w])
-    w = 30s for the 5-minute markets, 60s for the 15-minute markets.
+    Up  iff  mean(P over [T-w, T))  >=  mean(P over [-w, 0))
+    w = 30s. BOTH averages are TRAILING: the strike is the w seconds
+    BEFORE the window opens, not the first w seconds inside it. This is
+    what a Chainlink `<coin>-usd-twap-30s-streams` feed sampled at the two
+    boundaries produces, and it is what the venue metadata points at.
 
-Before 2026-08-07 the contract was  P_T >= P_0  (two instants).
-Confirmed empirically: on markets where the two rules disagree, the OLD
-rule was correct 80.5% pre-change (n=200) and 49.1% post-change (n=55) --
-i.e. the old rule stopped governing exactly at the changeover.
+Verified on the settled outcomes of 2,880 post-change markets across five
+coins (free Binance 1s klines as the price path):
+
+    rule                       pre-change   post-change
+    old  P(t1) >= P(t0)          0.9491       0.8904
+    trailing / trailing          0.9129       0.9503   <-- governs after
+    forward strike [0,w]         0.8990       0.8943
+
+and on the 266 post-change markets where the trailing rule and the old
+rule disagree, the trailing rule is correct 82.7% vs the old rule's 17.3%
+(every coin individually 73-91%). A scan over w peaks exactly at 30s
+(15s 0.9302, 20s 0.9344, 30s 0.9503, 45s 0.9399, 60s 0.9149).
+
+NOTE: an earlier revision of this file assumed a FORWARD strike over
+[0, w]. That is the row above that does not govern in either era; the
+consequence is that K is known at t=0 and there is no dead zone at the
+start of the window.
 
 --------------------------------------------------------------------
 MATHEMATICS
-Let K = mean(P,[0,w]) (fully known once t >= w) and A = mean(P,[T-w,T]).
+Let K = mean(P,[-w,0)) (known at t=0) and A = mean(P,[T-w,T)).
 Driftless, sigma = dollar vol per sqrt(second).
 
-Phase 2 -- w <= t <= T-w   (averaging window not yet started, s = T-w-t):
+Phase 2 -- 0 <= t <= T-w   (averaging window not yet started, s = T-w-t):
     A | F_t ~ N( P_t , sigma^2 * (s + w/3) )
     P(Up) = Phi( (P_t - K) / (sigma * sqrt(s + w/3)) )
   => EFFECTIVE remaining time is (T-t) - 2w/3, not (T-t).
@@ -34,8 +50,8 @@ our own G(z), and any bot built before 2026-08-07) prices the old
 contract and is therefore systematically wrong in the back of every
 window.
 
-Phase 1 (t < w, strike still forming) is deliberately not traded: K and A
-are both random there. Use `strike_known()` to gate.
+There is no phase 1: K is a backward-looking constant, so the contract is
+priceable from t=0. `strike_known` is retained as a no-op for callers.
 """
 import numpy as np
 from scipy.stats import norm
@@ -43,16 +59,20 @@ from scipy.stats import norm
 W_BY_HORIZON = {"5m": 30.0, "15m": 60.0}
 
 
-def strike_known(t, w):
-    """Strike is only fully determined once the first w seconds elapse."""
-    return np.asarray(t, dtype=float) >= w
+def strike_known(t, w=None):
+    """Always true under the trailing-strike rule; K is set before t=0.
+
+    Kept so existing callers keep working after the correction.
+    """
+    return np.ones_like(np.asarray(t, dtype=float), dtype=bool)
 
 
 def fair(P_t, K, R, T, t, w, sigma):
-    """P(Up) for the rolling-average contract. Requires t >= w.
+    """P(Up) for the rolling-average contract.
 
     P_t   : current price
-    K     : strike = mean price over [0, w]
+    K     : strike = mean price over [-w, 0), i.e. the w seconds
+            BEFORE the window opened (known at t=0)
     R     : integral of price over [T-w, t] (price-seconds); 0 if t <= T-w
     T,t,w : window length, elapsed time, averaging length (seconds)
     sigma : dollar vol per sqrt(second)

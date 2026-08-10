@@ -1,12 +1,12 @@
 {
   "mode": "paper",
   "families": {
-    "15m": 900,
-    "5m": 300
+    "5m": 300,
+    "15m": 900
   },
   "risk": {
     "max_market_shares": 200,
-    "max_market_dollars": 60.0,
+    "max_market_dollars": 100.0,
     "max_concurrent_markets": 4,
     "daily_loss_limit": 300.0,
     "stale_binance_s": 3.0,
@@ -41,10 +41,13 @@
   },
   "rollavg_edge": {
     "enabled": true,
-    "window_s": 45,
-    "edge_min": 0.08,
+    "window_s": 60,
+    "zmin": 2.0,
+    "edge_min": 0.02,
     "size": 100,
-    "max_price": 0.97
+    "max_price": 0.97,
+    "min_rem_s": 2.0
   },
-  "_note": "Settlement changed 2026-08-07 to rolling-average (w=30s/60s). vacuum_ladder disabled: it exploited last-second spikes, which the new rule neutralises."
+  "_note": "Settlement changed 2026-08-07 to a TRAILING TWAP at BOTH boundaries: Up iff mean(P,[t1-30,t1)) >= mean(P,[t0-30,t0)). Verified on 2,880 settled markets (0.9503 vs 0.8904 for the old rule; 82.7% correct on the 266 disagreeing markets). rollavg_edge trades the venue's failure to re-price this: +3.04c/share at |z|>=2 vs +0.19c on a pre-change control. vacuum_ladder stays off: it harvested last-second spikes, which an average neutralises.",
+  "coin": "btc"
 }

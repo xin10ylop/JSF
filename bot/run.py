@@ -61,11 +61,17 @@ class Bot:
     # ---- market discovery ---------------------------------------------
     async def discover(self, session):
         fams = self.cfg.get("families", {"15m": 900, "5m": 300})
+        # single coin by design: BotState carries one oracle ring buffer,
+        # one vol estimator and one basis series. BTC alone supplies 2.42M
+        # of the 2.98M qualifying shares measured post-change, so the
+        # multi-coin build (per-coin state) is a capacity upgrade, not a
+        # prerequisite. See reports/findings.md.
+        coin = self.cfg.get("coin", "btc")
         now = int(time.time())
         for fam, step in fams.items():
             t0 = now - (now % step)
             for k in (0, 1):
-                slug = f"btc-updown-{fam}-{t0 + k * step}"
+                slug = f"{coin}-updown-{fam}-{t0 + k * step}"
                 if slug in self.state.markets:
                     continue
                 try:
@@ -110,9 +116,19 @@ class Bot:
                                    "result": result, "pnl": pnl})
 
     def _settle_result(self, m):
-        if m.end_px is None or m.strike is None:
+        """Settle on the VERIFIED post-2026-08-07 contract:
+
+            Up iff mean(P over [t1-w, t1)) >= mean(P over [t0-w, t0))
+
+        Both averages trail. Settling paper fills on the pre-change rule
+        (end price vs strike price) would silently mis-score every trade,
+        so this reads both averages straight off the oracle ring buffer.
+        """
+        K = self.state.strike_avg(m)
+        r_sum, r_n = self.state.settle_sum_so_far(m, m.t1_us)
+        if K is None or r_n < max(int(m.w * 0.5), 5):
             return None
-        return 0 if m.end_px >= m.strike else 1
+        return 0 if (r_sum / r_n) >= K else 1
 
     # ---- feeds ---------------------------------------------------------
     async def binance_feed(self):

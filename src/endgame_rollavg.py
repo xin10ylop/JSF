@@ -81,9 +81,14 @@ def build(coin, root, lo_rel, days_filter=None, era="post"):
 
     ks, kn = csum(t.t0.values - W, t.t0.values)
     t["K"] = np.where(kn >= W - 2, ks / np.maximum(kn, 1), np.nan)
+    # Inside the settle window S is the locked partial sum; before it opens
+    # the window has not started, so S is 0 and n is 0 (csum would return a
+    # negative span there, which must NOT be read as a real sum).
     ss, sn = csum(t.t1.values - W, t.ts.values)
-    t["S"] = np.where(sn >= 0, ss, np.nan)
-    t["nlock"] = sn
+    inside = sn >= 0
+    t["S"] = np.where(inside, ss, 0.0)
+    t["nlock"] = np.where(inside, sn, 0)
+    t["inside"] = inside
     t["spot"] = spot_at(t.ts.values)
     t["rem"] = t.t1.values - t.ts.values
 
@@ -92,8 +97,17 @@ def build(coin, root, lo_rel, days_filter=None, era="post"):
     sig = (r.rolling(3600, min_periods=600).std()
            .reindex(t.ts.values).values) * t["spot"].values
     t["sigma"] = sig
-    t["M"] = t.S + t.rem * t.spot - W * t.K
-    t["sd"] = t.sigma * np.sqrt(np.maximum(t.rem ** 3 / 3.0, 1e-12))
+    # z has two branches, matching the contract's two phases:
+    #   inside the settle window  M = S + rem*spot - w*K, sd = sig*sqrt(rem^3/3)
+    #   before it opens           M = spot - K,           sd = sig*sqrt(s + w/3)
+    #                             with s = (t1-w) - tau
+    s_pre = np.maximum((t.t1.values - W) - t.ts.values, 0.0)
+    M_in = t.S + t.rem * t.spot - W * t.K
+    sd_in = t.sigma * np.sqrt(np.maximum(t.rem ** 3 / 3.0, 1e-12))
+    M_pre = t.spot - t.K
+    sd_pre = t.sigma * np.sqrt(np.maximum(s_pre + W / 3.0, 1e-12))
+    t["M"] = np.where(t.inside, M_in, M_pre)
+    t["sd"] = np.where(t.inside, sd_in, sd_pre)
     t["z"] = t.M / t.sd
     t["is_ask"] = ((t.is_up_tok) & (t.side == "BUY")) | \
                   ((~t.is_up_tok) & (t.side == "SELL"))

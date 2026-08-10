@@ -124,50 +124,72 @@ class ExtremeTaker:
 
 
 class RollAvgEdge:
-    """Post-2026-08-07 contract edge monitor / trader.
+    """Endgame taker on the post-2026-08-07 trailing-TWAP contract.
 
-    The venue changed settlement on 2026-08-07 to
-        Up iff mean(P,[T-w,T]) >= mean(P,[0,w]),  w=30s (5m) / 60s (15m).
-    Any book still priced on the old terminal rule is systematically wrong
-    in the back of the window: measured on real BTC paths, at 5s left the
-    correct pricer scores Brier 0.0026 vs 0.0449 for the legacy pricer,
-    with p90 disagreement of 22pp.
+    Verified contract (2,880 settled markets, five coins):
+        Up iff mean(P over [t1-w, t1)) >= mean(P over [t0-w, t0)), w = 30s
+    Both averages trail; the strike is known before the window opens.
 
-    This emits a signal when |correct_fair - market| clears `edge_min` in
-    the final `window_s`. It ALWAYS logs the gap (even when not trading) so
-    that paper mode measures whether the market has adapted to the new rule.
+    Inside the last w seconds the outcome is progressively LOCKED: only the
+    remaining `rem` seconds still move the average, and their contribution
+    has sd sigma*sqrt(rem^3/3). The old contract had no lock-in, so a book
+    still quoting it is wrong late in the window in a computable direction.
+
+    Measured against real prints on 2026-08-07..09 (no fill assumptions,
+    net of the venue's 0.07*p*(1-p) taker fee):
+        |z|>=2.0  ->  +3.04c/share on 2.56M shares, per-day SE 0.07
+        pre-change control, identical machinery  ->  +0.19c/share
+    All 15 coin x day cells positive.
+
+    Gate matches the backtest exactly: last `window_s` seconds, |z| >= zmin,
+    and the favoured side's ask at least `edge_min` below its fair value.
+    Observations are recorded on every tick regardless of whether we trade,
+    so paper mode keeps measuring whether the venue has re-priced.
     """
 
     def __init__(self, cfg):
-        self.window_s = cfg.get("window_s", 45)
-        self.edge_min = cfg.get("edge_min", 0.08)
+        self.window_s = cfg.get("window_s", 60)
+        self.zmin = cfg.get("zmin", 2.0)
+        self.edge_min = cfg.get("edge_min", 0.02)
         self.size = cfg.get("size", 100)
         self.max_price = cfg.get("max_price", 0.97)
+        self.min_rem_s = cfg.get("min_rem_s", 2.0)
         self.observations = []
+        self.fired = set()
 
     def evaluate(self, state, m, t_us):
         rem = (m.t1_us - t_us) / 1e6
-        if rem > self.window_s or rem <= 1.0:
+        # Only inside the settle window. Measured: the edge is +3.04c/share
+        # for rem <= w but only +1.64c (and day-unstable) once prints before
+        # the window opens are included -- the mechanism is the variance
+        # collapse of the partial average, which does not exist before then.
+        if rem > min(self.window_s, m.w) or rem <= self.min_rem_s:
             return None
         fv = state.fair(m, t_us)
-        if fv is None:
+        z = state.zscore(m, t_us)
+        if fv is None or z is None:
             return None
-        legacy = state.fair_legacy(m, t_us)
         bb, bbs = m.best_bid()
         ba, bas = m.best_ask()
         if bb is None or ba is None or not (0 < bb < ba < 1):
             return None
-        mid = (bb + ba) / 2
-        self.observations.append((m.slug, rem, mid, fv, legacy))
-        # buy Up at ask when the correct pricer says the ask is cheap
-        if fv - ba >= self.edge_min and ba <= self.max_price:
+        self.observations.append((m.slug, rem, (bb + ba) / 2, fv, z,
+                                  state.fair_legacy(m, t_us)))
+        if m.slug in self.fired:
+            return None                      # one entry per market
+        if z >= self.zmin and ba <= self.max_price \
+                and fv - ba >= self.edge_min:
+            self.fired.add(m.slug)
             return {"action": "taker_buy", "side": "Up", "px": ba,
                     "avail": bas, "size": self.size,
-                    "reason": f"rollavg fv {fv:.3f} vs ask {ba:.3f} "
-                              f"(legacy {legacy if legacy is None else round(legacy,3)}) rem {rem:.0f}s"}
+                    "reason": f"rollavg z={z:+.2f} fair {fv:.3f} vs ask "
+                              f"{ba:.3f} rem {rem:.0f}s"}
         ask_dn = 1 - bb
-        if (1 - fv) - ask_dn >= self.edge_min and ask_dn <= self.max_price:
+        if z <= -self.zmin and ask_dn <= self.max_price \
+                and (1 - fv) - ask_dn >= self.edge_min:
+            self.fired.add(m.slug)
             return {"action": "taker_buy", "side": "Down", "px": ask_dn,
                     "avail": bbs, "size": self.size,
-                    "reason": f"rollavg fvD {1-fv:.3f} vs askD {ask_dn:.3f} rem {rem:.0f}s"}
+                    "reason": f"rollavg z={z:+.2f} fairD {1-fv:.3f} vs askD "
+                              f"{ask_dn:.3f} rem {rem:.0f}s"}
         return None

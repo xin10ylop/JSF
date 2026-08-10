@@ -81,19 +81,27 @@ class GzPricer:
 
 
 class MarketState:
-    """Post-2026-08-07 contract: Up iff mean(P,[T-w,T]) >= mean(P,[0,w]),
-    w = 30s (5m markets) / 60s (15m). We accumulate the oracle tick stream
-    into the strike average and the settlement average."""
+    """Post-2026-08-07 contract, as VERIFIED on 2,880 settled markets:
+
+        Up  iff  mean(P over [t1-w, t1))  >=  mean(P over [t0-w, t0))
+
+    BOTH averages are trailing (a Chainlink `*-usd-twap-30s-streams` feed
+    sampled at the two boundaries), w = 30s. The strike therefore closes
+    BEFORE the window opens and is a known constant for the whole life of
+    the market -- there is no dead zone at the start.
+
+    Both averages are read on demand from BotState's oracle ring buffer
+    rather than accumulated here, because the strike window has already
+    elapsed by the time the market is discovered.
+    """
 
     __slots__ = ("slug", "asset_id_up", "asset_id_dn", "t0_us", "t1_us",
                  "strike", "bids", "asks", "last_trade_px", "last_trade_us",
-                 "book_us", "end_px", "w", "k_sum", "k_n", "r_sum", "r_n",
-                 "last_oracle_px")
+                 "book_us", "end_px", "w", "k_fixed", "last_oracle_px")
 
     def __init__(self, slug, asset_id_up, t0_us, t1_us, asset_id_dn=None):
         self.w = 30.0 if (t1_us - t0_us) <= 300_000_000 else 60.0
-        self.k_sum = 0.0; self.k_n = 0        # strike window [t0, t0+w]
-        self.r_sum = 0.0; self.r_n = 0        # settle window [t1-w, t1]
+        self.k_fixed = None                   # strike, latched once at t0
         self.last_oracle_px = None
         self.slug = slug
         self.asset_id_up = asset_id_up
@@ -109,19 +117,7 @@ class MarketState:
         self.book_us = 0
 
     def on_oracle_tick(self, px, round_ts_us):
-        """Accumulate the two averages that define the contract."""
         self.last_oracle_px = px
-        if self.t0_us <= round_ts_us < self.t0_us + int(self.w * 1e6):
-            self.k_sum += px; self.k_n += 1
-        if self.t1_us - int(self.w * 1e6) <= round_ts_us < self.t1_us:
-            self.r_sum += px; self.r_n += 1
-
-    def strike_avg(self):
-        """Known once w seconds of the window have elapsed."""
-        return self.k_sum / self.k_n if self.k_n else None
-
-    def settle_avg_so_far(self):
-        return (self.r_sum, self.r_n)
 
     def best_bid(self):
         return self.bids[0] if self.bids else (None, 0.0)
@@ -141,6 +137,38 @@ class BotState:
         self.basis = deque(maxlen=600)   # (oracle/binance) samples, 1/s
         self.markets = {}                # slug -> MarketState
         self.pricer = GzPricer()
+        # oracle ring buffer: (round_ts_us, px). The strike window of a 5m
+        # market has already elapsed when the market is discovered, so both
+        # contract averages are read from here, not accumulated per market.
+        self.oracle_hist = deque(maxlen=4000)   # ~1/s -> >1h of history
+
+    def _avg_over(self, a_us, b_us):
+        """(sum, n) of oracle prints with round timestamp in [a_us, b_us)."""
+        s = 0.0
+        n = 0
+        for ts, px in self.oracle_hist:
+            if a_us <= ts < b_us:
+                s += px
+                n += 1
+        return s, n
+
+    def strike_avg(self, m):
+        """mean(P over [t0-w, t0)) -- latched once, then reused."""
+        if m.k_fixed is not None:
+            return m.k_fixed
+        w_us = int(m.w * 1e6)
+        s, n = self._avg_over(m.t0_us - w_us, m.t0_us)
+        if n < max(int(m.w * 0.5), 5):
+            return None                      # not enough history recorded
+        if now_us() >= m.t0_us:
+            m.k_fixed = s / n                # window closed: latch it
+        return s / n
+
+    def settle_sum_so_far(self, m, t_us=None):
+        """(sum, n) of oracle prints already inside [t1-w, t1)."""
+        t_us = t_us or now_us()
+        w_us = int(m.w * 1e6)
+        return self._avg_over(m.t1_us - w_us, min(t_us, m.t1_us))
 
     # ---- feed handlers -------------------------------------------------
     def on_binance(self, price, ts_ms):
@@ -154,6 +182,9 @@ class BotState:
         self.oracle_px = price
         self.oracle_round_ts_us = round_ts_ms * 1000
         self.oracle_us = now_us()
+        if (not self.oracle_hist
+                or self.oracle_hist[-1][0] != self.oracle_round_ts_us):
+            self.oracle_hist.append((self.oracle_round_ts_us, price))
         for m in self.markets.values():
             m.on_oracle_tick(price, self.oracle_round_ts_us)
             if m.strike is None and self.oracle_round_ts_us >= m.t0_us:
@@ -183,7 +214,10 @@ class BotState:
         return self.binance_px * ratio
 
     def fair(self, m: MarketState, t_us=None):
-        """Fair value of the CURRENT (rolling-average) contract."""
+        """P(Up) for the CURRENT (trailing-TWAP) contract.
+
+        Strike is backward-looking, so this is valid from t=0 onward.
+        """
         import sys as _s, os as _o
         _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.dirname(
             _o.path.abspath(__file__))), "src"))
@@ -191,23 +225,48 @@ class BotState:
         t_us = t_us or now_us()
         T = (m.t1_us - m.t0_us) / 1e6
         t = (t_us - m.t0_us) / 1e6
-        K = m.strike_avg()
+        K = self.strike_avg(m)
         spot = self.spot_adj()
-        if K is None or spot is None or t < m.w or t >= T:
-            return None                      # strike not yet formed / expired
+        if K is None or spot is None or t < 0 or t >= T:
+            return None
         if self.vol.var is None or self.vol.var <= 0:
             return None
         sigma = (self.vol.var ** 0.5) * spot     # dollar vol per sqrt(sec)
-        r_sum, r_n = m.settle_avg_so_far()
+        r_sum, _ = self.settle_sum_so_far(m, t_us)
         R = float(r_sum)                          # price-seconds (1 tick/sec)
         return float(_fair(spot, K, R, T, t, m.w, sigma))
+
+    def zscore(self, m: MarketState, t_us=None):
+        """Signed margin in sds of the still-unrealised part of the average.
+
+        Inside the settle window this is the exact quantity the endgame
+        backtest gated on; outside it, the phase-2 equivalent.
+        """
+        t_us = t_us or now_us()
+        T = (m.t1_us - m.t0_us) / 1e6
+        t = (t_us - m.t0_us) / 1e6
+        K = self.strike_avg(m)
+        spot = self.spot_adj()
+        if K is None or spot is None or t >= T:
+            return None
+        if self.vol.var is None or self.vol.var <= 0:
+            return None
+        sigma = (self.vol.var ** 0.5) * spot
+        rem = T - t
+        if t <= T - m.w:
+            s = max((T - m.w) - t, 0.0)
+            sd = sigma * ((s + m.w / 3.0) ** 0.5)
+            return (spot - K) / sd if sd > 0 else None
+        r_sum, _ = self.settle_sum_so_far(m, t_us)
+        sd = sigma * ((rem ** 3) / 3.0) ** 0.5
+        return (r_sum + spot * rem - K * m.w) / sd if sd > 0 else None
 
     def fair_legacy(self, m: MarketState, t_us=None):
         """Pre-2026-08-07 pricer — kept ONLY to measure market adaptation."""
         t_us = t_us or now_us()
         rem_s = (m.t1_us - t_us) / 1e6
         spot = self.spot_adj()
-        K = m.strike_avg() or m.strike
+        K = self.strike_avg(m) or m.strike
         if K is None or spot is None or rem_s <= 0:
             return None
         return self.pricer.fair(spot, K, self.vol.var, rem_s)
