@@ -53,6 +53,11 @@ class Bot:
             self.strategies.append(ExtremeTaker(cfg.get("extreme_taker", {})))
         self.decisions = open("logs/decisions.jsonl", "a")
         self.pending = {}      # slug -> MarketState awaiting settlement
+        self.n_clob = 0        # counters surfaced in the health log so a
+        self.n_clob_err = 0    # silently-stalled feed is visible at a glance
+        self.n_eval_err = 0
+        self.n_eval = 0
+        self.n_signal = 0
 
     def log_decision(self, obj):
         obj["t_us"] = now_us()
@@ -200,6 +205,16 @@ class Bot:
         queue = asyncio.Queue(50_000)
 
         async def consumer():
+            """Drain the queue. MUST NOT die.
+
+            This is a fire-and-forget task, so an exception here is not
+            propagated: the process stays alive, systemd sees it running,
+            the queue silently fills, and no book update is ever processed
+            again. Book age then grows past the staleness limit so the 1s
+            fallback stops trading too -- fills simply stop with nothing
+            appearing to be wrong. Every event is therefore isolated, and
+            the task is restarted if it ever exits.
+            """
             while True:
                 msg = await queue.get()
                 if msg == "PONG":
@@ -209,9 +224,25 @@ class Bot:
                 except Exception:  # noqa: BLE001
                     continue
                 for ev in (d if isinstance(d, list) else [d]):
-                    self._on_clob(ev)
+                    try:
+                        self._on_clob(ev)
+                        self.n_clob += 1
+                    except Exception as e:  # noqa: BLE001
+                        self.n_clob_err += 1
+                        if self.n_clob_err <= 20:
+                            self.log_decision({"kind": "clob_handler_err",
+                                               "err": repr(e)[:200]})
 
-        asyncio.create_task(consumer())
+        async def supervise_consumer():
+            while True:
+                try:
+                    await consumer()
+                except Exception as e:  # noqa: BLE001
+                    self.log_decision({"kind": "consumer_died",
+                                       "err": repr(e)[:200]})
+                await asyncio.sleep(1)
+
+        asyncio.create_task(supervise_consumer())
         while True:
             ids = []
             for m in self.state.markets.values():
@@ -374,6 +405,10 @@ class Bot:
             self.log_decision({
                 "kind": "health", "markets": len(s.markets),
                 "pending_settle": len(self.pending),
+                "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
+                "evals": self.n_eval, "eval_errs": self.n_eval_err,
+                "signals": self.n_signal, "killed": self.risk.killed,
+                "day_pnl": round(self.risk.day_pnl, 2),
                 "oracle_hist": len(s.oracle_hist), "basis_n": len(s.basis),
                 "vol_var": s.vol.var, "binance_px": s.binance_px,
                 "oracle_px": s.oracle_px, "spot_adj": s.spot_adj(),
@@ -381,11 +416,22 @@ class Bot:
                 "detail": mk})
 
     def _try_market(self, m):
+        """Guarded wrapper: one market's failure must never stop the loop."""
+        try:
+            self._try_market_inner(m)
+        except Exception as e:  # noqa: BLE001
+            self.n_eval_err += 1
+            if self.n_eval_err <= 20:
+                self.log_decision({"kind": "eval_err", "slug": m.slug,
+                                   "err": repr(e)[:200]})
+
+    def _try_market_inner(self, m):
         """Evaluate every strategy for one market and route any signal.
 
         Shared by the 1s safety-net loop and the event-driven book handler,
         so both paths take exactly the same decision.
         """
+        self.n_eval += 1
         st = self.state.staleness()
         book_age = (now_us() - m.book_us) / 1e6 if m.book_us else 1e9
         if not self.risk.inputs_ok(st, book_age):
@@ -414,6 +460,7 @@ class Bot:
                                      sig["size"], px, nmk)
             if size <= 0:
                 continue
+            self.n_signal += 1
             self.log_decision({"kind": "signal", "slug": m.slug,
                                **{k: v for k, v in sig.items()
                                   if k != "action"},
