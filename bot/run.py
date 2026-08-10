@@ -52,6 +52,7 @@ class Bot:
         if cfg.get("extreme_taker", {}).get("enabled", False):
             self.strategies.append(ExtremeTaker(cfg.get("extreme_taker", {})))
         self.decisions = open("logs/decisions.jsonl", "a")
+        self.pending = {}      # slug -> MarketState awaiting settlement
 
     def log_decision(self, obj):
         obj["t_us"] = now_us()
@@ -113,7 +114,16 @@ class Bot:
                 pnl = self.broker.settle(slug, result)
                 self.risk.on_settle_pnl(pnl)
                 self.log_decision({"kind": "settled", "slug": slug,
-                                   "result": result, "pnl": pnl})
+                                   "result": result, "pnl": pnl,
+                                   "src": "oracle"})
+            elif any(k[0] == slug and v["shares"] > 0
+                     for k, v in self.broker.positions.items()):
+                # We hold a position we cannot yet score. Dropping it here
+                # orphans the fill in the broker forever and silently biases
+                # the paper record (observed live: a 100-share fill at 0.37
+                # that never settled). Park it for the settle loop instead.
+                self.pending[slug] = m
+                self.log_decision({"kind": "settle_deferred", "slug": slug})
 
     def _settle_result(self, m):
         """Settle on the VERIFIED post-2026-08-07 contract:
@@ -279,6 +289,65 @@ class Bot:
             self.broker.on_trade_print(up_aid, px, sz, now_us())
 
     # ---- decision loop -------------------------------------------------
+    async def settle_loop(self):
+        """Settle deferred markets: retry the oracle, then fall back to the
+        venue's own resolved outcome.
+
+        Gamma is authoritative and free, so there is no reason for a paper
+        fill to go unscored. Anything still unresolved after `give_up_s` is
+        logged loudly rather than dropped.
+        """
+        give_up_s = 3600
+        async with aiohttp.ClientSession() as session:
+            while True:
+                await asyncio.sleep(30)
+                for slug, m in list(self.pending.items()):
+                    result = self._settle_result(m)
+                    src = "oracle"
+                    if result is None and now_us() > m.t1_us + 120_000_000:
+                        result = await self._gamma_result(session, slug)
+                        src = "gamma"
+                    if result is not None:
+                        pnl = self.broker.settle(slug, result)
+                        self.risk.on_settle_pnl(pnl)
+                        self.log_decision({"kind": "settled", "slug": slug,
+                                           "result": result, "pnl": pnl,
+                                           "src": src})
+                        self.pending.pop(slug, None)
+                    elif now_us() > m.t1_us + give_up_s * 1_000_000:
+                        self.log_decision({"kind": "settle_FAILED",
+                                           "slug": slug,
+                                           "note": "position left unscored"})
+                        self.pending.pop(slug, None)
+
+    async def _gamma_result(self, session, slug):
+        """0 if Up won, 1 if Down won, from the venue's settled outcome."""
+        try:
+            async with session.get(
+                    GAMMA, params={"slug": slug, "closed": "true"},
+                    timeout=aiohttp.ClientTimeout(total=15)) as r:
+                if r.status != 200:
+                    return None
+                arr = await r.json()
+        except Exception:  # noqa: BLE001
+            return None
+        if not arr:
+            return None
+        mk = arr[0]
+        op = mk.get("outcomePrices")
+        oc = mk.get("outcomes")
+        if isinstance(op, str):
+            op = json.loads(op)
+        if isinstance(oc, str):
+            oc = json.loads(oc)
+        if not op:
+            return None
+        iu = oc.index("Up") if oc and "Up" in oc else 0
+        try:
+            return 0 if float(op[iu]) > 0.5 else 1
+        except (TypeError, ValueError):
+            return None
+
     async def health_loop(self):
         """Periodic snapshot of every input the pricer needs.
 
@@ -304,6 +373,7 @@ class Bot:
                                    if m.book_us else None)}
             self.log_decision({
                 "kind": "health", "markets": len(s.markets),
+                "pending_settle": len(self.pending),
                 "oracle_hist": len(s.oracle_hist), "basis_n": len(s.basis),
                 "vol_var": s.vol.var, "binance_px": s.binance_px,
                 "oracle_px": s.oracle_px, "spot_adj": s.spot_adj(),
@@ -374,7 +444,8 @@ class Bot:
     async def main(self):
         await asyncio.gather(self.binance_feed(), self.rtds_feed(),
                              self.clob_feed(), self.decide_loop(),
-                             self.discovery_loop(), self.health_loop())
+                             self.discovery_loop(), self.health_loop(),
+                             self.settle_loop())
 
 
 def acquire_lock(path="logs/bot.lock"):

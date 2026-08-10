@@ -329,3 +329,36 @@ drift apart.
 realised take rate stays near 6% at ~21 shares, the true figure is an order
 of magnitude lower. Gate 1 is NOT passed; it needs the 48h with the
 event-driven build.
+
+### I.8 The paper record was hiding losses (caught from 6 live fill lines)
+
+13. **Unsettleable positions were orphaned, not scored.** `_settle_result`
+    returns None when the oracle ring buffer lacks coverage of [t1-w, t1)
+    — after a restart, or a feed gap. The market was then popped from
+    `state.markets` and the position stayed in the broker forever: no
+    settle line, no P&L, silently absent from the record.
+
+    Observed live on the droplet's first three fills. The bot's own log
+    showed two wins, +$5.59. Scored against the venue's resolved outcomes
+    the truth was **-$33.04**: the missing fill (Down @0.370, 100 shares)
+    LOST -$38.63. A performance read taken hours later would have been
+    biased by exactly the fills the bot could not score.
+
+    Fixed two ways, because one was not enough:
+    - `bot/run.py` now parks unsettleable markets in `self.pending`, retries
+      the oracle every 30s, and falls back to the venue's own resolved
+      outcome via Gamma after t1+120s. Anything still unresolved at
+      t1+1h logs `settle_FAILED` loudly instead of vanishing.
+    - `src/score_paper.py` scores the fill log **independently of the bot**,
+      against Gamma. Paper performance should never depend on the bot
+      settling itself correctly. This is now the tool of record.
+
+14. **False alarm worth recording.** A fill at ask 0.970 against a logged
+    `emp_fairD 0.817` looked like a -15c/share blunder. It is not: `p_up(z)`
+    is a z-MARGINAL, pooled over all market-price states. Conditional on the
+    book also quoting 0.97, the realised hit rate is **0.99**, not 0.91.
+    Realised EV is positive in every fill-price bucket at the bot's gate
+    (0.92-0.95: +4.84c; 0.95-0.97: +2.68c), and the 42% of shares where the
+    marginal model says "negative" realise **+3.07c**. So `require_edge`
+    must stay off, and the logged `ev_est` is an honest summary statistic,
+    NOT a per-trade fair value. Do not turn it into a filter.
