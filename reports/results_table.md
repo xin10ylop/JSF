@@ -128,3 +128,11 @@ reading 22x low; and the vol estimator not being the backtest's estimator
 (5x low). Two more would have wasted the 48h gate-1 wait: `depth_sim`
 reading files the pruner deletes, and testing a 60s window with Phi(z)
 instead of the bot's 30s settle window with the empirical fair.
+
+| # | Hypothesis | Result | Verdict |
+|---|---|---|---|
+| H51 | If the taker path is depth-constrained, rest a bid to CATCH the dips instead | Fills 11-14% of markets but at hit rate **0.676** vs the taker's 0.916 — you are filled precisely when the favoured side is collapsing. **-26.4c/share** (day-SE 3.9, t=-6.8) at fair-0.02, and **-25.1c pre-change** on the same machinery. Queue-irrelevant (queue 0 vs 200 differ 0.3c) | **REFUTED** — pure adverse selection, unrelated to the rule change |
+
+Consequence: the taker path is the ONLY viable execution for this edge, so
+gate 1 (ex-ante resting depth at <=0.97) alone decides whether it is
+tradeable. There is no maker fallback.
