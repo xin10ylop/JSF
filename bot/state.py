@@ -274,6 +274,47 @@ class BotState:
             self.oracle_hist.append((ts, px))
         return len(self.oracle_hist)
 
+    def oracle_sigma_rel(self, lookback_s=3600):
+        """1s log-return sd of the ORACLE series itself, gap-corrected.
+
+        The backtest was self-consistent: path, both window averages and
+        sigma all came from Binance 1s klines. The bot is not — it takes
+        the two averages from the Chainlink feed (correctly, that is what
+        settles) but sigma from Binance. Measured on recorded ticks the
+        oracle is ~1.23x as volatile as Binance at 1s, so borrowing
+        Binance's sigma understates the denominator of z by ~23% and makes
+        the bot overconfident.
+
+        Only adjacent-second pairs are used: the feed misses ~38% of
+        seconds, and treating a 3-second move as a 1-second return would
+        inflate sd by sqrt(3).
+        """
+        cutoff = now_us() - lookback_s * 1_000_000
+        by_sec = {}
+        for ts, px in self.oracle_hist:
+            if ts >= cutoff and px > 0:
+                by_sec[ts // 1_000_000] = px
+        if len(by_sec) < 300:
+            return None
+        rets = []
+        for sec, px in by_sec.items():
+            prev = by_sec.get(sec - 1)
+            if prev:
+                rets.append(math.log(px / prev))
+        if len(rets) < 300:
+            return None
+        m = sum(rets) / len(rets)
+        var = sum((r - m) ** 2 for r in rets) / (len(rets) - 1)
+        sd = math.sqrt(var)
+        return sd if VOL_SD_MIN <= sd <= VOL_SD_MAX else None
+
+    def sigma_rel(self):
+        """Relative 1s vol to price z with: oracle first, Binance fallback."""
+        s = self.oracle_sigma_rel()
+        if s is not None:
+            return s
+        return math.sqrt(self.vol.var) if self.vol.ok() else None
+
     def _integral(self, a_us, b_us):
         """Time-weighted integral of the oracle price over [a_us, b_us).
 
@@ -392,12 +433,20 @@ class BotState:
         spot = self.spot_adj()
         if K is None or spot is None or t < 0 or t >= T:
             return None
-        if not self.vol.ok():
+        srel = self.sigma_rel()
+        if srel is None:
             return None                      # implausible vol -> do not price
-        sigma = (self.vol.var ** 0.5) * spot     # dollar vol per sqrt(sec)
+        sigma = srel * spot                  # dollar vol per sqrt(sec)
         r_sum, _ = self.settle_sum_so_far(m, t_us)
-        R = float(r_sum)                          # price-seconds (1 tick/sec)
-        return float(_fair(spot, K, R, T, t, m.w, sigma))
+        R = float(r_sum)                          # price-seconds
+        gauss = float(_fair(spot, K, R, T, t, m.w, sigma))
+        # Phi(z) is measurably overconfident here (z>3 settles Up 91.6%, not
+        # 99.87%). Report the empirical calibration so edge_min binds on a
+        # real number. See bot/calib.py.
+        from bot.calib import p_up
+        z = self.zscore(m, t_us)
+        emp = p_up(z)
+        return gauss if emp is None else float(emp)
 
     def zscore(self, m: MarketState, t_us=None):
         """Signed margin in sds of the still-unrealised part of the average.
@@ -412,9 +461,10 @@ class BotState:
         spot = self.spot_adj()
         if K is None or spot is None or t >= T:
             return None
-        if not self.vol.ok():
+        srel = self.sigma_rel()
+        if srel is None:
             return None
-        sigma = (self.vol.var ** 0.5) * spot
+        sigma = srel * spot
         rem = T - t
         if t <= T - m.w:
             s = max((T - m.w) - t, 0.0)

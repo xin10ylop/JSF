@@ -241,3 +241,40 @@ Running tally of bugs this audit caught: 8. Five of them (the paper-broker
 settlement rule, the tick-sum vs integral, the duplicate instance, the cold
 EWMA, and this estimator mismatch) would each on their own have made live
 trading lose money while the backtest still looked correct.
+
+### I.7 Two consistency corrections found by interrogating the feed itself
+
+9. **Sigma was borrowed from the wrong series.** The backtest is fully
+   self-consistent: path, both window averages and sigma all come from
+   Binance 1s klines. The bot is not — it reads the two contract averages
+   off the Chainlink feed (correct: that is what settles) but took sigma
+   from Binance. Measured on recorded ticks, the oracle's 1s sd is
+   **1.23x** Binance's (3.64e-5 vs 2.95e-5 over the same window, using only
+   adjacent-second pairs — the feed misses ~38% of seconds and treating a
+   3s move as a 1s return would inflate sd by sqrt(3)). Borrowing Binance's
+   sigma therefore understated the denominator of z by ~23%, again in the
+   overconfident direction. `BotState.sigma_rel()` now prefers an
+   oracle-derived sd and falls back to Binance only if the oracle window is
+   too sparse.
+
+   Also checked and cleared: the RTDS feed publishes **spot rounds, not an
+   already-TWAPed value** (lag-1 autocorrelation of its 1s returns is
+   +0.24; a 30s TWAP would show ~+0.9 and an sd ratio near 0.18). So
+   averaging the feed over the settle window reproduces the contract rather
+   than double-averaging it.
+
+10. **Phi(z) is not the fair value.** The Gaussian is badly overconfident at
+    this horizon: measured on 122,709 real prints, z > 3 settles Up **91.6%**
+    of the time, not the 99.87% Phi(3) implies. With Phi as `fair`, the
+    bot's `fair - ask >= edge_min` test was vacuous — Phi saturates at 1.0
+    the moment z clears the gate, so any ask below 0.98 passed. `bot/calib.py`
+    now supplies the measured z -> P(Up) mapping, so edge_min binds on a real
+    number and the bot declines asks that are rich against the *empirical*
+    probability. Example: at z=2 the empirical fair is 0.863, so an ask of
+    0.88 is correctly refused where Phi(2)=0.977 would have taken it.
+
+Tally: 10 bugs/corrections. The recurring shape is worth naming — every one
+of the last five came from the live system being *consistent with itself*
+but inconsistent with the configuration the edge was measured in. Parity
+tests that inject shared inputs cannot see that class of error; only
+driving the real code path with a known answer can.

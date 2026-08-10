@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bot.state import BotState, MarketState, OnlineVol  # noqa: E402
 from bot.strategy import RollAvgEdge  # noqa: E402
 from bot.paper import PaperBroker  # noqa: E402
+from bot.calib import p_up  # noqa: E402
 
 W = 30.0
 FEE = 0.07
@@ -53,6 +54,7 @@ def main():
     # synthetic market's strike window and the comparison is meaningless.
     st.oracle_hist.clear()
     st.vol.force_var((3.0 / base) ** 2)          # 3 dollars per sqrt(sec)
+    st.oracle_sigma_rel = lambda *a, **k: None   # force Binance fallback
     st.binance_px = None
     m = MarketState("recon-5m", "tok_up", t0 * 1_000_000, t1 * 1_000_000,
                     asset_id_dn="tok_dn")
@@ -81,7 +83,9 @@ def main():
         sig_t = (st.vol.var ** 0.5) * path[tau]
         zo = offline_z(path, t0, t1, tau, K_off, sig_t)
         zb = st.zscore(m, tau * 1_000_000)
-        fo = float(norm.cdf(zo))
+        # fair is the EMPIRICAL calibration of z, not Phi(z): Phi is
+        # measurably overconfident here (z>3 settles Up 91.6%, not 99.87%).
+        fo = float(p_up(zo))
         fb = st.fair(m, tau * 1_000_000)
         worst_z = max(worst_z, abs(zo - zb))
         worst_f = max(worst_f, abs(fo - fb))
@@ -90,7 +94,8 @@ def main():
               f"{abs(fo-fb):>10.2e}")
     print(f"\nworst |dz| = {worst_z:.3e}   worst |dfair| = {worst_f:.3e}")
     assert worst_z < 1e-9 and worst_f < 1e-9, "bot/backtest pricing diverges"
-    print("PASS: bot z and fair are bit-identical to the backtest formula")
+    print("PASS: bot z is bit-identical to the backtest formula, and fair "
+          "is its empirical calibration")
 
     # settlement must use the verified contract, not the old rule
     settle = float(np.mean([path[u] for u in range(int(t1 - W), int(t1))]))
@@ -145,6 +150,7 @@ def main():
         st2 = BotState()
         st2.oracle_hist.clear()
         st2.vol.force_var((3.0 / base) ** 2)
+        st2.oracle_sigma_rel = lambda *a, **k: None
         st2.basis.clear()
         m2 = MarketState("recon-rate", "tok_up", t0 * 1_000_000,
                          t1 * 1_000_000, asset_id_dn="tok_dn")
