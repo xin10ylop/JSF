@@ -111,3 +111,20 @@ gamma `/markets?slug=..&closed=true` (100 slugs/req, outcomes + resolutionSource
 
 Settlement rule (verified): `Up iff mean(P over [t1-30, t1)) >= mean(P over [t0-30, t0))`.
 The strike is BACKWARD-looking and known at t0.
+
+## Round 5 — deployment, live audit, and gate 1 (2026-08-10)
+
+| # | Hypothesis / check | Result | Verdict |
+|---|---|---|---|
+| H47 | The RTDS feed publishes an already-TWAPed price (would make our averaging a double-average) | Lag-1 autocorr of its 1s returns +0.24 (a 30s TWAP would be ~+0.9); sd ratio vs Binance 1.23, not 0.18 | REFUTED — feed is spot rounds, averaging is correct |
+| H48 | Phi(z) is an adequate fair value | z>3 settles Up **91.6%**, not Phi(3)=99.87%. Using Phi made `fair-ask>=edge_min` vacuous | REFUTED — replaced by empirical `bot/calib.py` |
+| H49 | The empirical-fair edge filter improves the strategy | It CHANGES it: fires on 5x fewer shares at avg px **0.389**, hit 0.501, +10.15c/share, but pre-change control **+2.24c** vs +0.49c. A longshot effect, not the settlement change | SEPARATE EFFECT — behind `require_edge`, off by default |
+| H50 | The endgame mispricing is available as resting depth (GATE 1) | Flow IS takeable: 85% of settle-window volume is BUY prints, **67% at or below the standing best ask**. BUT at \|z\|>=2 the favoured side rests at median **0.990**; only 6% of snapshots have >=10 shares at <=0.97; 41% of the time best ask >0.97. 1s polling filled **1 market in 17**, 21 of 100 shares | **NOT PASSED — open.** Edge is in transient dips; bot made event-driven |
+
+Live-audit bug tally: 12. The five that would each have lost money silently:
+paper-broker settling on the pre-change rule; oracle tick-sum instead of a
+time integral; duplicate bot instances sharing the fill log; a cold EWMA
+reading 22x low; and the vol estimator not being the backtest's estimator
+(5x low). Two more would have wasted the 48h gate-1 wait: `depth_sim`
+reading files the pruner deletes, and testing a 60s window with Phi(z)
+instead of the bot's 30s settle window with the empirical fair.
