@@ -207,3 +207,37 @@ each finished hour to the endgame snapshots the depth test needs and deletes
 the raw file: measured 3.8 GB -> 928 KB of parquet (~3,000x) with no loss of
 evidence inside the final 90s of any window. It runs hourly via
 `jsf-prune.timer`.
+
+### I.6 The estimator mismatch (the most dangerous bug so far)
+
+8. **The live vol estimator was not the backtest's estimator.** The
+   +3.04c/share measurement computes sigma as
+
+       log(px).diff().rolling(3600, min_periods=600).std() * spot
+
+   a one-hour TRAILING standard deviation of 1s returns. `bot/state.py`
+   used a 300s-halflife EWMA instead. Different estimator, and live on the
+   droplet it read **2.6e-6 against a two-day actual of 1.34e-5** -- 5x
+   low. Sigma is the DENOMINATOR of z, so this inflated z 5x: the health
+   log showed `z=19.13` at 60s remaining and `fair=0.9943` on a 15m market
+   whose book was still near 0.5.
+
+   Everything downstream of that would have been noise: the gate fires on
+   |z|>=2, and a 5x-inflated z clears it constantly.
+
+   Fixed: `OnlineVol` is now a 3600-second rolling window of 1s log returns
+   taking the sample sd (ddof=1, matching pandas), warm-started by paging
+   the public kline endpoint backwards until the full hour is filled.
+   Live sd is now 1.855e-5 -- the right estimator and the right magnitude.
+
+   **Why the earlier reconciliation missed it:** every parity check injected
+   the SAME sigma into both the bot and the offline formula, which by
+   construction cannot detect an estimator mismatch. `reconcile_bot.py` now
+   drives a known path through the live updater and asserts the bot's own
+   sigma equals `rolling(3600).std()` on that path (measured: 0.00% diff).
+   Injecting a shared input hides exactly the bug you are testing for.
+
+Running tally of bugs this audit caught: 8. Five of them (the paper-broker
+settlement rule, the tick-sum vs integral, the duplicate instance, the cold
+EWMA, and this estimator mismatch) would each on their own have made live
+trading lose money while the backtest still looked correct.
