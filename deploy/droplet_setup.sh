@@ -29,6 +29,20 @@ pip3 install -r requirements.txt --break-system-packages 2>/dev/null \
 
 mkdir -p logs data/live data/live/books reports
 
+# --- swap: a 512MB droplet cannot hold two pandas/scipy processes ----------
+# The recorder and the bot each carry ~150-250 MB RSS once numpy/scipy are
+# imported, and the daily edge check loads parquet on top of that. Without
+# swap the box OOMs and drops SSH.
+if [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  echo 'vm.swappiness=20' > /etc/sysctl.d/99-jsf.conf && sysctl -p /etc/sysctl.d/99-jsf.conf
+fi
+free -h
+
 cat > /etc/systemd/system/jsf-recorder.service <<'UNIT'
 [Unit]
 Description=JSF live data recorder (Binance / Chainlink RTDS / Polymarket CLOB)
@@ -38,6 +52,7 @@ Wants=network-online.target
 [Service]
 WorkingDirectory=/opt/jsf
 ExecStart=/usr/bin/python3 bot/recorder.py
+OOMScoreAdjust=-500
 Restart=always
 RestartSec=5
 
@@ -54,6 +69,7 @@ Wants=network-online.target
 [Service]
 WorkingDirectory=/opt/jsf
 ExecStart=/usr/bin/python3 bot/run.py
+OOMScoreAdjust=-500
 Restart=always
 RestartSec=5
 
@@ -69,7 +85,7 @@ Description=JSF book pruner (distil endgame snapshots, reclaim disk)
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/jsf
-ExecStart=/usr/bin/python3 bot/prune.py --window 90 --keep-raw-hours 2
+ExecStart=/usr/bin/python3 bot/prune.py --window 90 --keep-raw-hours 1
 UNIT
 
 cat > /etc/systemd/system/jsf-prune.timer <<'UNIT'
@@ -77,7 +93,7 @@ cat > /etc/systemd/system/jsf-prune.timer <<'UNIT'
 Description=Run the JSF book pruner hourly
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*:00/20
 Persistent=true
 
 [Install]
@@ -92,6 +108,8 @@ Description=JSF daily edge / decay check
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/jsf
+MemoryMax=700M
+Nice=10
 ExecStart=/usr/bin/python3 src/daily_edge_check.py
 UNIT
 
