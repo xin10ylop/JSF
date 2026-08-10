@@ -136,3 +136,10 @@ instead of the bot's 30s settle window with the empirical fair.
 Consequence: the taker path is the ONLY viable execution for this edge, so
 gate 1 (ex-ante resting depth at <=0.97) alone decides whether it is
 tradeable. There is no maker fallback.
+
+| # | Hypothesis | Result | Verdict |
+|---|---|---|---|
+| H52 | The 15m family (which the bot also trades, 44% of live paper shares) carries the same edge | post-change \|z\|>=2 ask<=0.97: **+6.18c/share**, hit 0.781, 52,916 shares, 162 markets. Pre-change control **-3.26c**. Contrast is SHARPER than 5m (whose control is +1.39c). w=60s confirmed by resolutionSource `*-twap-60s-streams` and an accuracy peak at exactly 60s (0.9744) | **CONFIRMED** — `src/validate_15m.py` |
+
+Gap this closed: the headline measurement globbed `*_5m_*` only, so the bot
+was trading an unvalidated family until this ran.
