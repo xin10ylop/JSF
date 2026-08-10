@@ -141,6 +141,46 @@ class BotState:
         # market has already elapsed when the market is discovered, so both
         # contract averages are read from here, not accumulated per market.
         self.oracle_hist = deque(maxlen=4000)   # ~1/s -> >1h of history
+        self.backfill_oracle()
+
+    def backfill_oracle(self, symbol="btc/usd", lookback_s=1800):
+        """Seed the oracle ring buffer from the recorder's RTDS log.
+
+        The strike is mean(P over [t0-w, t0)), i.e. history from BEFORE a
+        market opens. A freshly restarted bot has none, so it would sit
+        blind for a full window. The recorder writes every oracle tick to
+        data/live/rtds/*.jsonl, so a restart can pick up where it left off.
+        """
+        import glob
+        import json as _j
+        cutoff_us = (now_us() - lookback_s * 1_000_000)
+        rows = []
+        for f in sorted(glob.glob("data/live/rtds/*.jsonl"))[-3:]:
+            try:
+                with open(f) as fh:
+                    for line in fh:
+                        if symbol not in line:
+                            continue
+                        try:
+                            d = _j.loads(line)
+                        except Exception:  # noqa: BLE001
+                            continue
+                        p = d.get("payload", {})
+                        if p.get("symbol") != symbol:
+                            continue
+                        ts_us = int(p["timestamp"]) * 1000
+                        if ts_us >= cutoff_us:
+                            rows.append((ts_us, float(p["value"])))
+            except OSError:
+                continue
+        rows.sort()
+        seen = set()
+        for ts, px in rows:
+            if ts in seen:
+                continue
+            seen.add(ts)
+            self.oracle_hist.append((ts, px))
+        return len(self.oracle_hist)
 
     def _avg_over(self, a_us, b_us):
         """(sum, n) of oracle prints with round timestamp in [a_us, b_us)."""

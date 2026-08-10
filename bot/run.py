@@ -265,6 +265,37 @@ class Bot:
             self.broker.on_trade_print(up_aid, px, sz, now_us())
 
     # ---- decision loop -------------------------------------------------
+    async def health_loop(self):
+        """Periodic snapshot of every input the pricer needs.
+
+        Without this a silent bot is indistinguishable from a bot with no
+        signals: fair() returns None if any of oracle history, basis or vol
+        is missing, and each has a different fix.
+        """
+        while True:
+            await asyncio.sleep(30)
+            s = self.state
+            mk = {}
+            for slug, m in list(s.markets.items())[:6]:
+                mk[slug] = {
+                    "rem_s": round((m.t1_us - now_us()) / 1e6, 1),
+                    "K": (round(s.strike_avg(m), 2)
+                          if s.strike_avg(m) else None),
+                    "fair": (round(s.fair(m), 4)
+                             if s.fair(m) is not None else None),
+                    "z": (round(s.zscore(m), 2)
+                          if s.zscore(m) is not None else None),
+                    "bid": m.best_bid()[0], "ask": m.best_ask()[0],
+                    "book_age_s": (round((now_us() - m.book_us) / 1e6, 1)
+                                   if m.book_us else None)}
+            self.log_decision({
+                "kind": "health", "markets": len(s.markets),
+                "oracle_hist": len(s.oracle_hist), "basis_n": len(s.basis),
+                "vol_var": s.vol.var, "binance_px": s.binance_px,
+                "oracle_px": s.oracle_px, "spot_adj": s.spot_adj(),
+                "stale": {k: round(v, 1) for k, v in s.staleness().items()},
+                "detail": mk})
+
     async def decide_loop(self):
         while True:
             await asyncio.sleep(1.0)
@@ -324,7 +355,7 @@ class Bot:
     async def main(self):
         await asyncio.gather(self.binance_feed(), self.rtds_feed(),
                              self.clob_feed(), self.decide_loop(),
-                             self.discovery_loop())
+                             self.discovery_loop(), self.health_loop())
 
 
 if __name__ == "__main__":
