@@ -245,33 +245,64 @@ class BotState:
             self.oracle_hist.append((ts, px))
         return len(self.oracle_hist)
 
-    def _avg_over(self, a_us, b_us):
-        """(sum, n) of oracle prints with round timestamp in [a_us, b_us)."""
-        s = 0.0
-        n = 0
+    def _integral(self, a_us, b_us):
+        """Time-weighted integral of the oracle price over [a_us, b_us).
+
+        Returns (price_seconds, seconds, n_ticks).
+
+        This MUST be an integral, not a sum of ticks. The backtest works on
+        Binance 1s klines, where exactly one sample covers each second, so
+        summing samples IS the integral. The Chainlink RTDS feed does not
+        tick at exactly 1 Hz, so summing its ticks scales the locked partial
+        average by the tick rate and blows up z (observed live: z = -5322
+        with 23s left). Holding each price until the next tick reproduces
+        the backtest quantity regardless of feed rate.
+        """
+        if b_us <= a_us:
+            return 0.0, 0.0, 0
+        last_before = None
+        pts = []
         for ts, px in self.oracle_hist:
-            if a_us <= ts < b_us:
-                s += px
-                n += 1
-        return s, n
+            if ts <= a_us:
+                last_before = px
+            elif ts < b_us:
+                pts.append((ts, px))
+        if last_before is None and not pts:
+            return 0.0, 0.0, 0
+        cur_t = a_us
+        cur_px = last_before if last_before is not None else pts[0][1]
+        total = 0.0
+        for ts, px in pts:
+            total += cur_px * (ts - cur_t)
+            cur_t, cur_px = ts, px
+        total += cur_px * (b_us - cur_t)
+        return total / 1e6, (b_us - a_us) / 1e6, len(pts)
+
+    def _avg_over(self, a_us, b_us):
+        """Back-compat shim: (price_seconds, seconds) over the interval."""
+        ps, secs, _ = self._integral(a_us, b_us)
+        return ps, secs
 
     def strike_avg(self, m):
         """mean(P over [t0-w, t0)) -- latched once, then reused."""
         if m.k_fixed is not None:
             return m.k_fixed
         w_us = int(m.w * 1e6)
-        s, n = self._avg_over(m.t0_us - w_us, m.t0_us)
-        if n < max(int(m.w * 0.5), 5):
-            return None                      # not enough history recorded
+        ps, secs, nticks = self._integral(m.t0_us - w_us, m.t0_us)
+        # require real coverage of the strike window, not just one stale
+        # tick held forward across the whole thing
+        if secs <= 0 or nticks < max(int(m.w * 0.3), 5):
+            return None
         if now_us() >= m.t0_us:
-            m.k_fixed = s / n                # window closed: latch it
-        return s / n
+            m.k_fixed = ps / secs            # window closed: latch it
+        return ps / secs
 
     def settle_sum_so_far(self, m, t_us=None):
-        """(sum, n) of oracle prints already inside [t1-w, t1)."""
+        """(price_seconds, seconds) already accumulated inside [t1-w, t1)."""
         t_us = t_us or now_us()
         w_us = int(m.w * 1e6)
-        return self._avg_over(m.t1_us - w_us, min(t_us, m.t1_us))
+        ps, secs, _ = self._integral(m.t1_us - w_us, min(t_us, m.t1_us))
+        return ps, secs
 
     # ---- feed handlers -------------------------------------------------
     def on_binance(self, price, ts_ms):

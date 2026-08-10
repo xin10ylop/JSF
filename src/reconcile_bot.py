@@ -135,6 +135,39 @@ def main():
     assert abs(eff - (sig["px"] + fee_c)) < 1e-6, \
         "paper broker fee does not match the verified schedule"
     print("PASS: paper broker charges the verified taker fee")
+
+    # ---- feed-rate invariance -------------------------------------------
+    # The backtest uses Binance 1s klines, where summing samples IS the
+    # integral. The live oracle does not tick at 1 Hz, so a tick-sum scales
+    # with feed rate and destroys z (observed live: z=-5322 at rem=23s).
+    # Re-run the same market at 3 Hz and 1/3 Hz: z must be ~unchanged.
+    base_z = None
+    for rate, label in ((1.0, "1 Hz"), (3.0, "3 Hz"), (1 / 3.0, "0.33 Hz")):
+        st2 = BotState()
+        st2.oracle_hist.clear()
+        st2.vol.var = (3.0 / base) ** 2
+        st2.vol.n = 10_000
+        st2.basis.clear()
+        m2 = MarketState("recon-rate", "tok_up", t0 * 1_000_000,
+                         t1 * 1_000_000, asset_id_dn="tok_dn")
+        st2.markets[m2.slug] = m2
+        step_us = int(1_000_000 / rate)
+        ts = (t0 - 60) * 1_000_000
+        while ts <= t1 * 1_000_000:
+            sec = ts // 1_000_000
+            st2.on_oracle(path[min(max(sec, t0 - 60), t1)], ts // 1000)
+            ts += step_us
+        st2.binance_px = path[t1 - 15]
+        st2.basis.extend([1.0] * 600)
+        z2 = st2.zscore(m2, (t1 - 15) * 1_000_000)
+        if base_z is None:
+            base_z = z2
+        drift = abs(z2 - base_z) / max(abs(base_z), 1e-9)
+        print(f"  oracle at {label:>8}: z = {z2:+.4f}   drift vs 1 Hz "
+              f"{drift:.2%}")
+        assert drift < 0.05, f"z depends on oracle tick rate ({label})"
+    print("PASS: z is invariant to oracle feed rate (time-weighted integral)")
+
     print("\nALL RECONCILIATION CHECKS PASSED")
 
 

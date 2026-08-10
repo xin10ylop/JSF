@@ -125,10 +125,10 @@ class Bot:
         so this reads both averages straight off the oracle ring buffer.
         """
         K = self.state.strike_avg(m)
-        r_sum, r_n = self.state.settle_sum_so_far(m, m.t1_us)
-        if K is None or r_n < max(int(m.w * 0.5), 5):
+        r_ps, r_secs = self.state.settle_sum_so_far(m, m.t1_us)
+        if K is None or r_secs < m.w * 0.9:
             return None
-        return 0 if (r_sum / r_n) >= K else 1
+        return 0 if (r_ps / r_secs) >= K else 1
 
     # ---- feeds ---------------------------------------------------------
     async def binance_feed(self):
@@ -358,7 +358,30 @@ class Bot:
                              self.discovery_loop(), self.health_loop())
 
 
+def acquire_lock(path="logs/bot.lock"):
+    """Refuse to start a second instance.
+
+    Two bots sharing logs/paper_fills.jsonl double-count every fill and
+    silently corrupt the paper record that the whole go/no-go decision
+    rests on. An advisory flock is enough: it is released automatically if
+    the process dies, so restarts stay clean.
+    """
+    import fcntl
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fh = open(path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("another bot/run.py already holds logs/bot.lock — exiting",
+              file=sys.stderr)
+        raise SystemExit(3)
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh                       # keep the handle alive for the process
+
+
 if __name__ == "__main__":
+    _lock = acquire_lock()
     cfg = load_cfg()
     bot = Bot(cfg)
     asyncio.run(bot.main())

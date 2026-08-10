@@ -176,3 +176,34 @@ All checks pass.
   before this passes.**
 - **Live paper fills.** Zero to date on the corrected build.
 - **Only 3 post-change days**, and the alt coins are already decaying.
+
+### I.4 Two more bugs, both caught live by the health heartbeat
+
+6. **The oracle sum was not an integral.** The backtest runs on Binance 1s
+   klines, where exactly one sample covers each second, so summing samples
+   IS the integral over the settle window. The Chainlink RTDS feed does not
+   tick at 1 Hz, so summing its ticks scales the locked partial average by
+   the feed rate. Observed live: `z = -5322` with 23s remaining. Fixed by
+   integrating piecewise-constant (each price held until the next tick) in
+   `BotState._integral`. `src/reconcile_bot.py` now asserts z is invariant
+   to feed rate: 3 Hz drifts 0.07%, 0.33 Hz drifts 2.74% (was ~3x error).
+   The strike is now a time-weighted mean for the same reason, and requires
+   real tick coverage rather than one stale tick held across the window.
+7. **Two bot instances ran concurrently** after a restart, both appending to
+   `logs/paper_fills.jsonl` — which would double-count every paper fill in
+   the record the go/no-go decision rests on. `bot/run.py` now takes an
+   advisory `flock` on `logs/bot.lock` and exits if another instance holds
+   it.
+
+Both were invisible in backtest and unit tests: the synthetic reconciliation
+feed ticks at exactly 1 Hz, which is precisely the case where the tick-sum
+bug disappears. The lesson recorded here is that **parity tests must vary
+the thing the backtest holds constant.**
+
+### I.5 Disk
+
+The recorder writes ~6.5 GB/day of raw CLOB JSONL. `bot/prune.py` distils
+each finished hour to the endgame snapshots the depth test needs and deletes
+the raw file: measured 3.8 GB -> 928 KB of parquet (~3,000x) with no loss of
+evidence inside the final 90s of any window. It runs hourly via
+`jsf-prune.timer`.
