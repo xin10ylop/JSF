@@ -195,6 +195,40 @@ def main():
         "live vol estimator does not match the backtest's rolling std"
     print("PASS: bot sigma IS the backtest's 1h trailing std of 1s returns")
 
+    # ---- book gate: one-sided books must not veto the tradeable side ----
+    # Live, a two-sided-Up-book requirement rejected 48 of 48 priced
+    # evaluations: in the settle window a near-decided market loses the bid
+    # on the losing token and quotes 0.001, which is exactly when the OTHER
+    # token is worth buying.
+    t0b = (int(time.time()) // 300) * 300
+    t1b = t0b + 300
+    sb = BotState()
+    sb.oracle_hist.clear()
+    sb.vol.force_var((3.0 / base) ** 2)
+    sb.oracle_sigma_rel = lambda *a, **k: None
+    sb.basis.extend([1.0] * 600)
+    for u in range(t0b - 40, t1b):
+        sb.on_oracle(65000.0 if u < t1b - 30 else 64900.0, u * 1000)
+    sb.binance_px = 64900.0
+    mb = MarketState("gate-5m", "up", t0b * 1_000_000, t1b * 1_000_000,
+                     asset_id_dn="dn")
+    sb.markets[mb.slug] = mb
+    taub = (t1b - 10) * 1_000_000
+    cfg = {"zmin": 2.0, "size": 100, "max_price": 0.97, "min_rem_s": 2.0,
+           "window_s": 60, "cooldown_s": 1.0}
+    mb.bids, mb.asks = [], [(0.001, 500.0)]          # Up side dead
+    mb.bids_dn, mb.asks_dn = [(0.90, 300.0)], [(0.93, 250.0)]
+    g = RollAvgEdge(cfg).evaluate(sb, mb, taub)
+    assert g and g["side"] == "Down" and abs(g["px"] - 0.93) < 1e-9, \
+        "one-sided Up book vetoed a tradeable Down side"
+    mb.asks, mb.asks_dn, mb.bids, mb.bids_dn = [], [], [], []
+    assert RollAvgEdge(cfg).evaluate(sb, mb, taub) is None, \
+        "fired with no ask anywhere"
+    mb.asks_dn = [(0.99, 400.0)]
+    assert RollAvgEdge(cfg).evaluate(sb, mb, taub) is None, \
+        "fired on an ask richer than max_price"
+    print("PASS: book gate trades the live side, refuses empty/rich books")
+
     print("\nALL RECONCILIATION CHECKS PASSED")
 
 
