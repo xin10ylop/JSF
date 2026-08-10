@@ -155,8 +155,16 @@ class RollAvgEdge:
         self.max_price = cfg.get("max_price", 0.97)
         self.min_rem_s = cfg.get("min_rem_s", 2.0)
         self.require_edge = cfg.get("require_edge", False)
+        # Liquidity at <=0.97 arrives as a STREAM, not a resting block: a
+        # qualifying BTC market trades a median 1,291 shares there across
+        # the settle window, but instantaneous depth is thin (only 6% of
+        # snapshots carry >=10 shares). One entry per market therefore
+        # captured ~40 of those. Re-entry is allowed, bounded by the risk
+        # caps (max_market_shares / max_market_dollars), with a short
+        # cooldown so a single book state is not taken twice.
+        self.cooldown_s = cfg.get("cooldown_s", 1.0)
         self.observations = []
-        self.fired = set()
+        self.last_fire = {}
 
     def evaluate(self, state, m, t_us):
         rem = (m.t1_us - t_us) / 1e6
@@ -176,8 +184,9 @@ class RollAvgEdge:
             return None
         self.observations.append((m.slug, rem, (bb + ba) / 2, fv, z,
                                   state.fair_legacy(m, t_us)))
-        if m.slug in self.fired:
-            return None                      # one entry per market
+        last = self.last_fire.get(m.slug)
+        if last is not None and (t_us - last) < self.cooldown_s * 1e6:
+            return None                      # same book state; wait
         # The VALIDATED gate is |z| >= zmin and ask <= max_price, nothing
         # more: that is exactly what was measured at +3.04c/share against
         # real prints, avg fill 0.877, hit 0.916.
@@ -195,7 +204,7 @@ class RollAvgEdge:
         if z >= self.zmin and ba <= self.max_price:
             if self.require_edge and fv - ba < self.edge_min:
                 return None
-            self.fired.add(m.slug)
+            self.last_fire[m.slug] = t_us
             return {"action": "taker_buy", "side": "Up", "px": ba,
                     "avail": bas, "size": self.size,
                     "ev_est": round(ev_of(fv, ba), 4), "z": round(z, 2),
@@ -205,7 +214,7 @@ class RollAvgEdge:
         if z <= -self.zmin and ask_dn <= self.max_price:
             if self.require_edge and (1 - fv) - ask_dn < self.edge_min:
                 return None
-            self.fired.add(m.slug)
+            self.last_fire[m.slug] = t_us
             return {"action": "taker_buy", "side": "Down", "px": ask_dn,
                     "avail": bbs, "size": self.size,
                     "ev_est": round(ev_of(1 - fv, ask_dn), 4),

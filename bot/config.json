@@ -5,8 +5,8 @@
     "15m": 900
   },
   "risk": {
-    "max_market_shares": 200,
-    "max_market_dollars": 100.0,
+    "max_market_shares": 300,
+    "max_market_dollars": 200.0,
     "max_concurrent_markets": 4,
     "daily_loss_limit": 900.0,
     "stale_binance_s": 3.0,
@@ -49,7 +49,8 @@
     "max_price": 0.97,
     "min_rem_s": 2.0,
     "require_edge": false,
-    "_gate_note": "VALIDATED gate = |z|>=zmin and ask<=max_price. require_edge adds empirical_fair-ask>=edge_min, which measures +10.15c/share but on 5x fewer shares at avg px 0.389 and with a +2.24c pre-change control -- a different (longshot) effect, not the settlement change. Keep it false until paper measures it separately."
+    "_gate_note": "VALIDATED gate = |z|>=zmin and ask<=max_price. require_edge adds empirical_fair-ask>=edge_min, which measures +10.15c/share but on 5x fewer shares at avg px 0.389 and with a +2.24c pre-change control -- a different (longshot) effect, not the settlement change. Keep it false until paper measures it separately.",
+    "cooldown_s": 1.0
   },
   "_note": "Settlement changed 2026-08-07 to a TRAILING TWAP at BOTH boundaries: Up iff mean(P,[t1-30,t1)) >= mean(P,[t0-30,t0)). Verified on 2,880 settled markets (0.9503 vs 0.8904 for the old rule; 82.7% correct on the 266 disagreeing markets). rollavg_edge trades the venue's failure to re-price this: +3.04c/share at |z|>=2 vs +0.19c on a pre-change control. vacuum_ladder stays off: it harvested last-second spikes, which an average neutralises.",
   "coin": "btc"

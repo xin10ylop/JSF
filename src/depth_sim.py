@@ -102,7 +102,15 @@ def run(a):
     snaps = {}
     nread = 0
 
-    def add(aid, ts, asks):
+    def add(aid, ts, asks, seq):
+        """seq orders updates WITHIN a second.
+
+        The recorder sees a mean of 4.77 book updates per token-second (p90
+        12, max 90). Keying snapshots by whole second and overwriting keeps
+        only the last one and discards 79% of them -- which silently
+        simulates 1-second polling rather than the bot's event-driven
+        evaluation, and understates the take rate.
+        """
         m = tok.get(str(aid))
         if m is None:
             return
@@ -113,8 +121,8 @@ def run(a):
         asks = sorted([(p, s) for p, s in asks if 0 < p < 1])
         if not asks:
             return
-        snaps.setdefault((slug, t0, t1, up_win), {}).setdefault(
-            ts, {})[is_up] = asks
+        snaps.setdefault((slug, t0, t1, up_win), []).append(
+            (int(seq), ts, is_up, asks))
 
     pq = sorted(glob.glob("data/live/books/*.parquet"))
     if a.days:
@@ -128,7 +136,8 @@ def run(a):
             nread += 1
             add(r.asset_id, int(r.ts),
                 list(zip([float(x) for x in r.ask_px],
-                         [float(x) for x in r.ask_sz])))
+                         [float(x) for x in r.ask_sz])),
+                int(r.t_local_us))
 
     raw = sorted(glob.glob("data/live/clob/*.jsonl"))
     if a.days:
@@ -147,7 +156,8 @@ def run(a):
                     continue
                 add(e.get("asset_id"), int(e["timestamp"]) // 1000,
                     [(float(x["price"]), float(x["size"]))
-                     for x in e.get("asks", [])])
+                     for x in e.get("asks", [])],
+                    e.get("t_local_us") or int(e["timestamp"]) * 1000)
     print(f"read {nread:,} records from {len(pq)} distilled + {len(raw)} raw "
           f"files; {len(snaps):,} post-change markets with book snapshots "
           f"in the final {a.window}s")
@@ -159,25 +169,24 @@ def run(a):
     px = Px("btc", days)
 
     trades = []
-    for (slug, t0, t1, up_win), bysec in sorted(snaps.items()):
+    for (slug, t0, t1, up_win), evs in sorted(snaps.items()):
+        evs.sort()                       # by arrival time within the market
+        latest = {}                      # token -> current asks, as the bot holds
         done = False
-        for ts in sorted(bysec):
+        for seq, ts, is_up, asks in evs:
+            latest[is_up] = asks
             if done:
                 break
             z = zscore(px, t0, t1, ts)
             if z is None or abs(z) < a.zmin:
                 continue
             want_up = z > 0
-            asks = bysec[ts].get(want_up)
-            if not asks:
+            asks_f = latest.get(want_up)
+            if not asks_f:
                 continue
-            fair = float(p_up(abs(z)))   # empirical, matching bot/calib.py
-            need = a.size
-            cost = 0.0
-            got = 0.0
-            for p, sz in asks:
-                # The bot's VALIDATED gate takes any ask at or below
-                # max_price; the fair filter is the require_edge variant.
+            fair = float(p_up(abs(z)))
+            need, cost, got = a.size, 0.0, 0.0
+            for p, sz in asks_f:
                 if p > a.max_px or (a.require_edge and p >= fair - a.edge_min):
                     break
                 take = min(sz, need - got)
