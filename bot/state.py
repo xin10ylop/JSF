@@ -346,7 +346,7 @@ class BotState:
         the backtest quantity regardless of feed rate.
         """
         if b_us <= a_us:
-            return 0.0, 0.0, 0
+            return 0.0, 0.0, 0, False
         last_before = None
         pts = []
         for ts, px in self.oracle_hist:
@@ -355,7 +355,8 @@ class BotState:
             elif ts < b_us:
                 pts.append((ts, px))
         if last_before is None and not pts:
-            return 0.0, 0.0, 0
+            return 0.0, 0.0, 0, False
+        covered = last_before is not None
         cur_t = a_us
         cur_px = last_before if last_before is not None else pts[0][1]
         total = 0.0
@@ -363,22 +364,34 @@ class BotState:
             total += cur_px * (ts - cur_t)
             cur_t, cur_px = ts, px
         total += cur_px * (b_us - cur_t)
-        return total / 1e6, (b_us - a_us) / 1e6, len(pts)
+        return total / 1e6, (b_us - a_us) / 1e6, len(pts), covered
 
     def _avg_over(self, a_us, b_us):
         """Back-compat shim: (price_seconds, seconds) over the interval."""
-        ps, secs, _ = self._integral(a_us, b_us)
+        ps, secs, _, _ = self._integral(a_us, b_us)
         return ps, secs
+
+    def oracle_rate(self, lookback_s=300):
+        """Oracle ticks per second over the recent past (health signal)."""
+        cutoff = now_us() - lookback_s * 1_000_000
+        n = sum(1 for ts, _ in self.oracle_hist if ts >= cutoff)
+        return round(n / lookback_s, 3)
 
     def strike_avg(self, m):
         """mean(P over [t0-w, t0)) -- latched once, then reused."""
         if m.k_fixed is not None:
             return m.k_fixed
         w_us = int(m.w * 1e6)
-        ps, secs, nticks = self._integral(m.t0_us - w_us, m.t0_us)
-        # require real coverage of the strike window, not just one stale
-        # tick held forward across the whole thing
-        if secs <= 0 or nticks < max(int(m.w * 0.3), 5):
+        ps, secs, nticks, covered = self._integral(m.t0_us - w_us, m.t0_us)
+        # The average is a TIME-WEIGHTED integral, so it does not need many
+        # ticks -- it needs a price in force from the start of the window
+        # (`covered`) plus enough updates that it is not one stale quote
+        # held across the whole thing. An earlier threshold of 0.3*w ticks
+        # (9 for a 5m market) exceeded the oracle's actual rate of ~0.2-1.0
+        # ticks/s, so K silently became None and NOTHING in the settle
+        # window could be priced -- the bot logged zero signals with no
+        # error anywhere.
+        if secs <= 0 or not covered or nticks < 3:
             return None
         if now_us() >= m.t0_us:
             m.k_fixed = ps / secs            # window closed: latch it
@@ -388,7 +401,7 @@ class BotState:
         """(price_seconds, seconds) already accumulated inside [t1-w, t1)."""
         t_us = t_us or now_us()
         w_us = int(m.w * 1e6)
-        ps, secs, _ = self._integral(m.t1_us - w_us, min(t_us, m.t1_us))
+        ps, secs, _, _ = self._integral(m.t1_us - w_us, min(t_us, m.t1_us))
         return ps, secs
 
     # ---- feed handlers -------------------------------------------------

@@ -413,7 +413,8 @@ class Bot:
                 "funnel": next((st.f for st in self.strategies
                                 if hasattr(st, "f")), None),
                 "day_pnl": round(self.risk.day_pnl, 2),
-                "oracle_hist": len(s.oracle_hist), "basis_n": len(s.basis),
+                "oracle_hist": len(s.oracle_hist),
+                "oracle_rate": s.oracle_rate(), "basis_n": len(s.basis),
                 "vol_var": s.vol.var, "binance_px": s.binance_px,
                 "oracle_px": s.oracle_px, "spot_adj": s.spot_adj(),
                 "stale": {k: round(v, 1) for k, v in s.staleness().items()},
