@@ -410,6 +410,8 @@ class Bot:
                 "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
                 "evals": self.n_eval, "eval_errs": self.n_eval_err,
                 "signals": self.n_signal, "killed": self.risk.killed,
+                "funnel": next((st.f for st in self.strategies
+                                if hasattr(st, "f")), None),
                 "day_pnl": round(self.risk.day_pnl, 2),
                 "oracle_hist": len(s.oracle_hist), "basis_n": len(s.basis),
                 "vol_var": s.vol.var, "binance_px": s.binance_px,

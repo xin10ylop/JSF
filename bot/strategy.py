@@ -165,8 +165,14 @@ class RollAvgEdge:
         self.cooldown_s = cfg.get("cooldown_s", 1.0)
         self.observations = []
         self.last_fire = {}
+        # Signal funnel: which condition kills each evaluation. Without this
+        # a zero-signal bot is indistinguishable from a broken one, and the
+        # backtest implies ~4 qualifying BTC 5m markets per hour.
+        self.f = {"eval": 0, "in_window": 0, "priced": 0, "book": 0,
+                  "z_pass": 0, "px_pass": 0, "cooldown": 0, "fired": 0}
 
     def evaluate(self, state, m, t_us):
+        self.f["eval"] += 1
         rem = (m.t1_us - t_us) / 1e6
         # Only inside the settle window. Measured: the edge is +3.04c/share
         # for rem <= w but only +1.64c (and day-unstable) once prints before
@@ -174,18 +180,24 @@ class RollAvgEdge:
         # collapse of the partial average, which does not exist before then.
         if rem > min(self.window_s, m.w) or rem <= self.min_rem_s:
             return None
+        self.f["in_window"] += 1
         fv = state.fair(m, t_us)
         z = state.zscore(m, t_us)
         if fv is None or z is None:
             return None
+        self.f["priced"] += 1
         bb, bbs = m.best_bid()
         ba, bas = m.best_ask()
         if bb is None or ba is None or not (0 < bb < ba < 1):
             return None
+        self.f["book"] += 1
+        if abs(z) >= self.zmin:
+            self.f["z_pass"] += 1
         self.observations.append((m.slug, rem, (bb + ba) / 2, fv, z,
                                   state.fair_legacy(m, t_us)))
         last = self.last_fire.get(m.slug)
         if last is not None and (t_us - last) < self.cooldown_s * 1e6:
+            self.f["cooldown"] += 1
             return None                      # same book state; wait
         # The VALIDATED gate is |z| >= zmin and ask <= max_price, nothing
         # more: that is exactly what was measured at +3.04c/share against
@@ -201,9 +213,12 @@ class RollAvgEdge:
         def ev_of(fair, ask):
             return fair - ask - 0.07 * ask * (1 - ask)
 
+        if abs(z) >= self.zmin and min(ba, 1 - bb) <= self.max_price:
+            self.f["px_pass"] += 1
         if z >= self.zmin and ba <= self.max_price:
             if self.require_edge and fv - ba < self.edge_min:
                 return None
+            self.f["fired"] += 1
             self.last_fire[m.slug] = t_us
             return {"action": "taker_buy", "side": "Up", "px": ba,
                     "avail": bas, "size": self.size,
@@ -216,6 +231,7 @@ class RollAvgEdge:
         if z <= -self.zmin and ask_dn <= self.max_price:
             if self.require_edge and (1 - fv) - ask_dn < self.edge_min:
                 return None
+            self.f["fired"] += 1
             self.last_fire[m.slug] = t_us
             return {"action": "taker_buy", "side": "Down", "px": ask_dn,
                     "avail": dn_sz, "size": self.size,
