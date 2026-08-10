@@ -40,8 +40,13 @@ def offline_z(path, t0, t1, tau, K, sigma):
 
 def main():
     rng = np.random.default_rng(7)
-    t0 = (int(time.time()) // 300) * 300          # a real 5m boundary
-    t1 = t0 + 300
+    # Anchor the synthetic window so its last oracle tick lands at ~now.
+    # Using the CURRENT boundary as t0 puts the ticks up to 5 minutes in the
+    # future, and a run that straddles a boundary then ages them past the
+    # 20s frozen-oracle guard mid-test -- a flaky failure in the harness,
+    # not the bot.
+    t1 = (int(time.time()) // 300) * 300
+    t0 = t1 - 300
     base = 65000.0
     # a driftless 1s path covering [t0-60, t1]
     secs = list(range(t0 - 60, t1 + 1))
@@ -164,6 +169,7 @@ def main():
         st2.binance_px = path[t1 - 15]
         st2.basis.extend([1.0] * 600)
         z2 = st2.zscore(m2, (t1 - 15) * 1_000_000)
+        assert z2 is not None, f"{label}: zscore returned None"
         if base_z is None:
             base_z = z2
         drift = abs(z2 - base_z) / max(abs(base_z), 1e-9)
@@ -200,8 +206,8 @@ def main():
     # evaluations: in the settle window a near-decided market loses the bid
     # on the losing token and quotes 0.001, which is exactly when the OTHER
     # token is worth buying.
-    t0b = (int(time.time()) // 300) * 300
-    t1b = t0b + 300
+    t1b = (int(time.time()) // 300) * 300
+    t0b = t1b - 300
     sb = BotState()
     sb.oracle_hist.clear()
     sb.vol.force_var((3.0 / base) ** 2)
@@ -235,7 +241,7 @@ def main():
     # this strategy trades transient dips that arrive as deltas.
     sd = BotState()
     sd.oracle_hist.clear()
-    t0d = (int(time.time()) // 300) * 300
+    t0d = (int(time.time()) // 300) * 300 - 300
     md = MarketState("delta-5m", "up", t0d * 1_000_000,
                      (t0d + 300) * 1_000_000, asset_id_dn="dn")
     sd.markets[md.slug] = md
