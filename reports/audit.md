@@ -381,3 +381,31 @@ event-driven build.
 
 Bug tally: 16. Running the system and reading its output has found more
 real defects than any amount of re-reading the backtest would have.
+
+### I.10 Two defects found from an hourly check showing zero new fills
+
+17. **The clob consumer was an unguarded fire-and-forget task.** When I made
+    evaluation event-driven, `_on_clob` began calling `_try_market` inside
+    `asyncio.create_task(consumer())` with no try/except. One exception
+    there kills the task silently: asyncio does not propagate it, the
+    process stays up so systemd reports `active`, the queue fills, and no
+    book update is ever processed again. `m.book_us` then freezes, book age
+    exceeds the staleness limit, and the 1s fallback stops trading too.
+    Fills simply stop with nothing appearing wrong -- exactly the observed
+    symptom. Now every event is isolated, the task is supervised and
+    restarted, `_try_market` is guarded per market, and the health log
+    carries `clob_evs / clob_errs / evals / eval_errs / signals / killed /
+    day_pnl` so a stall is visible at a glance instead of inferred from
+    missing fills.
+
+18. **The bot discarded the Down token's order book.** `_on_clob` returned
+    early on any Down-token book event ("tracked on the up token only") and
+    the strategy priced the Down side as `1 - best_bid_up`. That is wrong
+    on two counts: on Polymarket the Down side is taken by BUYING the Down
+    token off its own ask, whereas `1 - bid_up` is the price for SELLING
+    Up (which requires Up inventory); and the two books are separate and
+    can diverge, so the mirror is only a proxy. Roughly half the paper
+    fills so far were Down. `MarketState` now keeps both books and
+    `best_ask_dn()` uses the real Down ask, falling back to the mirror only
+    when the Down book is absent, tagging which was used (`dn_src`) so the
+    two can be compared in the fill log.

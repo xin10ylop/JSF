@@ -151,7 +151,8 @@ class MarketState:
 
     __slots__ = ("slug", "asset_id_up", "asset_id_dn", "t0_us", "t1_us",
                  "strike", "bids", "asks", "last_trade_px", "last_trade_us",
-                 "book_us", "end_px", "w", "k_fixed", "last_oracle_px")
+                 "book_us", "end_px", "w", "k_fixed", "last_oracle_px",
+                 "bids_dn", "asks_dn", "book_dn_us")
 
     def __init__(self, slug, asset_id_up, t0_us, t1_us, asset_id_dn=None):
         self.w = 30.0 if (t1_us - t0_us) <= 300_000_000 else 60.0
@@ -164,8 +165,15 @@ class MarketState:
         self.t0_us = t0_us
         self.t1_us = t1_us
         self.strike = None
-        self.bids = []      # [(price, size)] best first
+        self.bids = []      # Up token, [(price, size)] best first
         self.asks = []
+        # The Down token has its OWN book. On Polymarket you take the Down
+        # side by BUYING the Down token off its own ask; 1 - best_bid_up is
+        # the price for SELLING Up, which needs Up inventory, and the two
+        # books can diverge. Track both.
+        self.bids_dn = []
+        self.asks_dn = []
+        self.book_dn_us = 0
         self.last_trade_px = None
         self.last_trade_us = 0
         self.book_us = 0
@@ -178,6 +186,15 @@ class MarketState:
 
     def best_ask(self):
         return self.asks[0] if self.asks else (None, 0.0)
+
+    def best_ask_dn(self):
+        """Real Down ask, falling back to the Up-book mirror if absent."""
+        if self.asks_dn:
+            return self.asks_dn[0] + ("book",)
+        bb, bbs = self.best_bid()
+        if bb is None:
+            return (None, 0.0, "none")
+        return (round(1.0 - bb, 4), bbs, "mirror")
 
 
 class BotState:
@@ -400,6 +417,11 @@ class BotState:
                 m.bids = bids
                 m.asks = asks
                 m.book_us = now_us()
+                return
+            if m.asset_id_dn == asset_id:
+                m.bids_dn = bids
+                m.asks_dn = asks
+                m.book_dn_us = now_us()
                 return
 
     def on_trade(self, asset_id, price, ts_ms):

@@ -290,8 +290,8 @@ class Bot:
                 mirror = True
                 break
         if et == "book":
-            if mirror:
-                return  # book state tracked on the up token only
+            # Both tokens' books are kept: the Down side is taken by buying
+            # the Down token off its own ask, not by mirroring the Up bid.
             # Polymarket orders levels worst-to-best; sort explicitly rather
             # than relying on reversed()/as-sent order.
             bids = sorted(((float(x["price"]), float(x["size"]))
@@ -299,6 +299,8 @@ class Bot:
             asks = sorted(((float(x["price"]), float(x["size"]))
                            for x in ev.get("asks", [])), key=lambda t: t[0])
             self.state.on_book(aid, bids, asks, ev.get("timestamp"))
+            if mirror:
+                aid = up_aid          # evaluate the market this book belongs to
             # Evaluate IMMEDIATELY on a book change inside the settle window.
             # The favoured side rests at ~0.99 most of the time and dips to
             # 0.87-0.92 only in the instants around a trade; a 1s polling

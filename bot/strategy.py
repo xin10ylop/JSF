@@ -210,15 +210,17 @@ class RollAvgEdge:
                     "ev_est": round(ev_of(fv, ba), 4), "z": round(z, 2),
                     "reason": f"rollavg z={z:+.2f} emp_fair {fv:.3f} vs ask "
                               f"{ba:.3f} rem {rem:.0f}s"}
-        ask_dn = 1 - bb
+        ask_dn, dn_sz, dn_src = m.best_ask_dn()
+        if ask_dn is None:
+            return None
         if z <= -self.zmin and ask_dn <= self.max_price:
             if self.require_edge and (1 - fv) - ask_dn < self.edge_min:
                 return None
             self.last_fire[m.slug] = t_us
             return {"action": "taker_buy", "side": "Down", "px": ask_dn,
-                    "avail": bbs, "size": self.size,
+                    "avail": dn_sz, "size": self.size,
                     "ev_est": round(ev_of(1 - fv, ask_dn), 4),
-                    "z": round(z, 2),
+                    "z": round(z, 2), "dn_src": dn_src,
                     "reason": f"rollavg z={z:+.2f} emp_fairD {1-fv:.3f} vs "
-                              f"askD {ask_dn:.3f} rem {rem:.0f}s"}
+                              f"askD {ask_dn:.3f}({dn_src}) rem {rem:.0f}s"}
         return None
