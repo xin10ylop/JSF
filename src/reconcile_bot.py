@@ -40,12 +40,13 @@ def offline_z(path, t0, t1, tau, K, sigma):
 
 def main():
     rng = np.random.default_rng(7)
-    # Anchor the synthetic window so its last oracle tick lands at ~now.
-    # Using the CURRENT boundary as t0 puts the ticks up to 5 minutes in the
-    # future, and a run that straddles a boundary then ages them past the
-    # 20s frozen-oracle guard mid-test -- a flaky failure in the harness,
-    # not the bot.
-    t1 = (int(time.time()) // 300) * 300
+    # Anchor the synthetic window so its LAST oracle tick lands at now.
+    # Boundary-aligning it is wrong in both directions: t0 = current
+    # boundary puts ticks up to 5 min in the future, while t1 = current
+    # boundary ages them by however far we are into the window (0-300s).
+    # Either way the 20s frozen-oracle guard trips depending on when the
+    # test happens to run. The window needs no alignment for the maths.
+    t1 = int(time.time())
     t0 = t1 - 300
     base = 65000.0
     # a driftless 1s path covering [t0-60, t1]
@@ -162,7 +163,11 @@ def main():
         st2.markets[m2.slug] = m2
         step_us = int(1_000_000 / rate)
         ts = (t0 - 60) * 1_000_000
-        while ts <= t1 * 1_000_000:
+        # feed up to NOW, not to t1: at 0.33 Hz the last tick can land 3s
+        # short of t1, and the seconds this test itself takes then push the
+        # newest round past the 20s frozen-oracle guard.
+        end_us = max(t1, int(time.time())) * 1_000_000
+        while ts <= end_us:
             sec = ts // 1_000_000
             st2.on_oracle(path[min(max(sec, t0 - 60), t1)], ts // 1000)
             ts += step_us
@@ -206,7 +211,7 @@ def main():
     # evaluations: in the settle window a near-decided market loses the bid
     # on the losing token and quotes 0.001, which is exactly when the OTHER
     # token is worth buying.
-    t1b = (int(time.time()) // 300) * 300
+    t1b = int(time.time())
     t0b = t1b - 300
     sb = BotState()
     sb.oracle_hist.clear()
@@ -241,7 +246,7 @@ def main():
     # this strategy trades transient dips that arrive as deltas.
     sd = BotState()
     sd.oracle_hist.clear()
-    t0d = (int(time.time()) // 300) * 300 - 300
+    t0d = int(time.time()) - 300
     md = MarketState("delta-5m", "up", t0d * 1_000_000,
                      (t0d + 300) * 1_000_000, asset_id_dn="dn")
     sd.markets[md.slug] = md
