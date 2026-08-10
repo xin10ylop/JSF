@@ -162,7 +162,14 @@ class RollAvgEdge:
         # captured ~40 of those. Re-entry is allowed, bounded by the risk
         # caps (max_market_shares / max_market_dollars), with a short
         # cooldown so a single book state is not taken twice.
-        self.cooldown_s = cfg.get("cooldown_s", 1.0)
+        # Re-entry is gated on the BOOK CHANGING, not on a timer. A 1s
+        # cooldown suppressed 867 of 1,681 in-window evaluations live --
+        # liquidity at <=0.99 arrives as a stream, so a timer throws away
+        # genuinely new asks. The real hazard a timer was standing in for is
+        # taking the SAME resting ask twice (fictional fills); keying on the
+        # book timestamp prevents that exactly, with no lost opportunity.
+        self.cooldown_s = cfg.get("cooldown_s", 0.0)
+        self.last_book = {}
         self.observations = []
         self.last_fire = {}
         # Signal funnel: which condition kills each evaluation. Without this
@@ -210,7 +217,11 @@ class RollAvgEdge:
         last = self.last_fire.get(m.slug)
         if last is not None and (t_us - last) < self.cooldown_s * 1e6:
             self.f["cooldown"] += 1
-            return None                      # same book state; wait
+            return None
+        if self.last_book.get(m.slug) == m.book_us:
+            self.f["cooldown"] += 1
+            return None                      # same book snapshot; would be
+                                             # a fictional second fill
         # The VALIDATED gate is |z| >= zmin and ask <= max_price, nothing
         # more: that is exactly what was measured at +3.04c/share against
         # real prints, avg fill 0.877, hit 0.916.
@@ -242,6 +253,7 @@ class RollAvgEdge:
                 return None
             self.f["fired"] += 1
             self.last_fire[m.slug] = t_us
+            self.last_book[m.slug] = m.book_us
             return {"action": "taker_buy", "side": "Up", "px": ba,
                     "avail": bas, "size": self.size,
                     "ev_est": round(ev_of(fv, ba), 4), "z": round(z, 2),
@@ -254,6 +266,7 @@ class RollAvgEdge:
                 return None
             self.f["fired"] += 1
             self.last_fire[m.slug] = t_us
+            self.last_book[m.slug] = m.book_us
             return {"action": "taker_buy", "side": "Down", "px": ask_dn,
                     "avail": dn_sz, "size": self.size,
                     "ev_est": round(ev_of(1 - fv, ask_dn), 4),

@@ -73,8 +73,10 @@ def main():
     f = d.get("funnel") or {}
     if f:
         print("\n=== SIGNAL FUNNEL (why evaluations do or don't fire) ===")
+        # cooldown is checked BETWEEN z_pass and px_pass; showing it last
+        # makes px_pass look like a fraction of z_pass when it is not.
         order = ["eval", "in_window", "priced", "book", "z_pass",
-                 "px_pass", "cooldown", "fired"]
+                 "cooldown", "px_pass", "fired"]
         prev = None
         for k in order:
             n = f.get(k, 0)
