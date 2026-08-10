@@ -56,7 +56,20 @@ def outcomes_for(slugs, session):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--log", default="logs/paper_fills.jsonl")
+    # The fill log accumulates across builds AND strategies. Scoring all of
+    # it mixes, e.g., old vacuum-ladder maker fills at ~0.21 with the
+    # current endgame taker -- a meaningless blend. Default to the strategy
+    # in production; widen deliberately.
+    ap.add_argument("--reason-prefix", default="rollavg",
+                    help="only fills whose reason starts with this ('' = all)")
+    ap.add_argument("--since", default=None,
+                    help="only fills at/after this UTC time, YYYY-MM-DDTHH:MM")
     a = ap.parse_args()
+    since_us = None
+    if a.since:
+        import datetime as _dt
+        since_us = int(_dt.datetime.strptime(a.since, "%Y-%m-%dT%H:%M")
+                       .replace(tzinfo=_dt.timezone.utc).timestamp() * 1e6)
     if not os.path.exists(a.log):
         print(f"no fill log at {a.log}")
         return
@@ -66,11 +79,21 @@ def main():
             d = json.loads(line)
         except Exception:  # noqa: BLE001
             continue
-        if d.get("kind") in ("taker_fill", "maker_fill"):
-            fills.append(d)
+        if d.get("kind") not in ("taker_fill", "maker_fill"):
+            continue
+        if a.reason_prefix:
+            r = (d.get("meta") or {}).get("reason", "")
+            if not r.startswith(a.reason_prefix):
+                continue
+        if since_us and d.get("t_us", 0) < since_us:
+            continue
+        fills.append(d)
     if not fills:
-        print("no fills yet")
+        print(f"no fills matching reason_prefix={a.reason_prefix!r}"
+              + (f" since {a.since}" if a.since else ""))
         return
+    print(f"(filtered to reason_prefix={a.reason_prefix!r}"
+          + (f", since {a.since}" if a.since else "") + ")")
     s = requests.Session()
     s.headers.update(UA)
     res = outcomes_for([f["slug"] for f in fills], s)
