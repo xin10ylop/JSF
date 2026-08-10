@@ -154,6 +154,7 @@ class RollAvgEdge:
         self.size = cfg.get("size", 100)
         self.max_price = cfg.get("max_price", 0.97)
         self.min_rem_s = cfg.get("min_rem_s", 2.0)
+        self.require_edge = cfg.get("require_edge", False)
         self.observations = []
         self.fired = set()
 
@@ -177,19 +178,38 @@ class RollAvgEdge:
                                   state.fair_legacy(m, t_us)))
         if m.slug in self.fired:
             return None                      # one entry per market
-        if z >= self.zmin and ba <= self.max_price \
-                and fv - ba >= self.edge_min:
+        # The VALIDATED gate is |z| >= zmin and ask <= max_price, nothing
+        # more: that is exactly what was measured at +3.04c/share against
+        # real prints, avg fill 0.877, hit 0.916.
+        #
+        # Adding `empirical_fair - ask >= edge_min` looks like a refinement
+        # but is a DIFFERENT STRATEGY. Measured, it fires on 5x fewer shares
+        # at an average price of 0.389 with a 0.501 hit rate (+10.15c), and
+        # its pre-change control is +2.24c versus +0.49c for the validated
+        # gate -- i.e. most of it is the longshot-underpricing effect, not
+        # the settlement change this bot exists to trade. It is available
+        # behind require_edge for paper measurement, and is off by default.
+        def ev_of(fair, ask):
+            return fair - ask - 0.07 * ask * (1 - ask)
+
+        if z >= self.zmin and ba <= self.max_price:
+            if self.require_edge and fv - ba < self.edge_min:
+                return None
             self.fired.add(m.slug)
             return {"action": "taker_buy", "side": "Up", "px": ba,
                     "avail": bas, "size": self.size,
-                    "reason": f"rollavg z={z:+.2f} fair {fv:.3f} vs ask "
+                    "ev_est": round(ev_of(fv, ba), 4), "z": round(z, 2),
+                    "reason": f"rollavg z={z:+.2f} emp_fair {fv:.3f} vs ask "
                               f"{ba:.3f} rem {rem:.0f}s"}
         ask_dn = 1 - bb
-        if z <= -self.zmin and ask_dn <= self.max_price \
-                and (1 - fv) - ask_dn >= self.edge_min:
+        if z <= -self.zmin and ask_dn <= self.max_price:
+            if self.require_edge and (1 - fv) - ask_dn < self.edge_min:
+                return None
             self.fired.add(m.slug)
             return {"action": "taker_buy", "side": "Down", "px": ask_dn,
                     "avail": bbs, "size": self.size,
-                    "reason": f"rollavg z={z:+.2f} fairD {1-fv:.3f} vs askD "
-                              f"{ask_dn:.3f} rem {rem:.0f}s"}
+                    "ev_est": round(ev_of(1 - fv, ask_dn), 4),
+                    "z": round(z, 2),
+                    "reason": f"rollavg z={z:+.2f} emp_fairD {1-fv:.3f} vs "
+                              f"askD {ask_dn:.3f} rem {rem:.0f}s"}
         return None
