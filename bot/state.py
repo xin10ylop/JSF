@@ -32,6 +32,9 @@ def now_us():
 VOL_SD_MIN = 1e-6
 VOL_SD_MAX = 5e-4
 
+# Refuse to price if the newest oracle ROUND is older than this.
+MAX_ORACLE_AGE_S = 20.0
+
 
 class OnlineVol:
     """One-hour TRAILING standard deviation of 1s log returns.
@@ -371,6 +374,19 @@ class BotState:
         ps, secs, _, _ = self._integral(a_us, b_us)
         return ps, secs
 
+    def oracle_age_s(self):
+        """Seconds since the newest oracle ROUND timestamp (not receipt).
+
+        Receipt-time staleness is not enough: the feed can keep delivering
+        while the underlying round stops advancing. A frozen oracle compared
+        against a live Binance spot manufactures a huge apparent margin and
+        therefore a huge |z| -- observed live as z_pass 77/77 alongside
+        oracle rate 0.0/s. Pricing must refuse in that state.
+        """
+        if not self.oracle_hist:
+            return 1e9
+        return (now_us() - self.oracle_hist[-1][0]) / 1e6
+
     def oracle_rate(self, lookback_s=300):
         """Oracle ticks per second over the recent past (health signal)."""
         cutoff = now_us() - lookback_s * 1_000_000
@@ -468,6 +484,8 @@ class BotState:
         spot = self.spot_adj()
         if K is None or spot is None or t < 0 or t >= T:
             return None
+        if self.oracle_age_s() > MAX_ORACLE_AGE_S:
+            return None                      # frozen oracle -> fake margin
         srel = self.sigma_rel()
         if srel is None:
             return None                      # implausible vol -> do not price
@@ -496,6 +514,8 @@ class BotState:
         spot = self.spot_adj()
         if K is None or spot is None or t >= T:
             return None
+        if self.oracle_age_s() > MAX_ORACLE_AGE_S:
+            return None                      # frozen oracle -> fake margin
         srel = self.sigma_rel()
         if srel is None:
             return None

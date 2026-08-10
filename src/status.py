@@ -44,14 +44,25 @@ def main():
         print("  !! STALE: no health line in over 2 minutes — bot may be down")
     print(f"  feed      clob_evs={d.get('clob_evs'):,} "
           f"errs={d.get('clob_errs')}  consumer alive={d.get('clob_errs') == 0}")
+    rate = d.get("oracle_rate")
+    st_ = d.get("stale") or {}
+    warn = "  << STALE, z is not trustworthy" if (rate is not None
+                                                  and rate < 0.05) else ""
     print(f"  oracle    ticks={d.get('oracle_hist')} "
-          f"rate={d.get('oracle_rate')}/s   basis={d.get('basis_n')}")
+          f"rate={rate}/s   age={st_.get('oracle_s')}s   "
+          f"basis={d.get('basis_n')}{warn}")
     v = d.get("vol_var")
     print(f"  vol       sd={(v ** 0.5):.2e}" if v else "  vol       n/a")
     print(f"  risk      killed={d.get('killed')} day_pnl={d.get('day_pnl')} "
           f"pending_settle={d.get('pending_settle')}")
-    print(f"  activity  evals={d.get('evals'):,} errs={d.get('eval_errs')} "
+    ev = d.get("evals") or 0
+    f0 = (d.get("funnel") or {}).get("eval", 0)
+    rej = ev - f0
+    print(f"  activity  evals={ev:,} errs={d.get('eval_errs')} "
           f"signals={d.get('signals')}")
+    if ev and rej > 0:
+        print(f"            {rej:,} ({rej/ev:.0%}) rejected before the "
+              f"strategy: STALE INPUTS")
 
     f = d.get("funnel") or {}
     if f:
@@ -68,7 +79,13 @@ def main():
             if k not in ("cooldown",):
                 prev = n
         diag = []
-        if f.get("in_window", 0) and not f.get("priced", 0):
+        if (d.get("oracle_rate") is not None
+                and d["oracle_rate"] < 0.05 and f.get("z_pass", 0)):
+            diag.append("ORACLE FROZEN: round timestamps are not advancing, "
+                        "so z is computed from a stale strike against a live "
+                        "spot. z_pass here is an ARTEFACT -- ignore any "
+                        "PRICED OUT / firing verdict until rate recovers.")
+        elif f.get("in_window", 0) and not f.get("priced", 0):
             diag.append("PRICING BLOCKED: no strike/sigma in the settle "
                         "window — check oracle rate and history depth")
         elif f.get("priced", 0) and not f.get("book", 0):
