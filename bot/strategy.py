@@ -225,6 +225,13 @@ class RollAvgEdge:
         def ev_of(fair, ask):
             return fair - ask - 0.07 * ask * (1 - ask)
 
+        # Stamp the oracle's freshness on every signal. A fill taken on a
+        # stale strike is worthless evidence, and without this the only way
+        # to tell is to correlate timestamps against health lines by hand --
+        # which is how -$162 of stale-oracle fills sat in the record looking
+        # like a strategy result.
+        oa = round(state.oracle_age_s(), 2)
+
         cands = [p for p in (ask_up if z > 0 else None,
                              ask_dn if z < 0 else None) if p is not None]
         if abs(z) >= self.zmin and cands and min(cands) <= self.max_price:
@@ -238,6 +245,7 @@ class RollAvgEdge:
             return {"action": "taker_buy", "side": "Up", "px": ba,
                     "avail": bas, "size": self.size,
                     "ev_est": round(ev_of(fv, ba), 4), "z": round(z, 2),
+                    "oracle_age_s": oa,
                     "reason": f"rollavg z={z:+.2f} emp_fair {fv:.3f} vs ask "
                               f"{ba:.3f} rem {rem:.0f}s"}
         if z <= -self.zmin and ask_dn is not None \
@@ -249,7 +257,7 @@ class RollAvgEdge:
             return {"action": "taker_buy", "side": "Down", "px": ask_dn,
                     "avail": dn_sz, "size": self.size,
                     "ev_est": round(ev_of(1 - fv, ask_dn), 4),
-                    "z": round(z, 2), "dn_src": dn_src,
+                    "z": round(z, 2), "dn_src": dn_src, "oracle_age_s": oa,
                     "reason": f"rollavg z={z:+.2f} emp_fairD {1-fv:.3f} vs "
                               f"askD {ask_dn:.3f}({dn_src}) rem {rem:.0f}s"}
         return None

@@ -64,6 +64,9 @@ def main():
                     help="only fills whose reason starts with this ('' = all)")
     ap.add_argument("--since", default=None,
                     help="only fills at/after this UTC time, YYYY-MM-DDTHH:MM")
+    ap.add_argument("--all-oracle", action="store_true",
+                    help="include fills taken on a stale/unstamped oracle "
+                         "(default: only fills stamped fresh)")
     a = ap.parse_args()
     since_us = None
     if a.since:
@@ -87,11 +90,22 @@ def main():
                 continue
         if since_us and d.get("t_us", 0) < since_us:
             continue
+        if not a.all_oracle:
+            oa = (d.get("meta") or {}).get("oracle_age_s")
+            # Unstamped fills predate the freshness stamp and were taken
+            # while the oracle could silently freeze -- unusable evidence.
+            if oa is None or oa > 20:
+                continue
         fills.append(d)
     if not fills:
-        print(f"no fills matching reason_prefix={a.reason_prefix!r}"
+        print("no fills yet on a verified-fresh oracle "
+              "(use --all-oracle to see the contaminated history)"
+              if not a.all_oracle else
+              f"no fills matching reason_prefix={a.reason_prefix!r}"
               + (f" since {a.since}" if a.since else ""))
         return
+    print(f"(fresh-oracle fills only; --all-oracle to include the rest)"
+          if not a.all_oracle else "(ALL fills, including stale-oracle)")
     print(f"(filtered to reason_prefix={a.reason_prefix!r}"
           + (f", since {a.since}" if a.since else "") + ")")
     s = requests.Session()

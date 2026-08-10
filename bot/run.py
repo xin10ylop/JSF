@@ -520,9 +520,12 @@ class Bot:
                     now_us() + int(sig.get("ttl_s", 20) * 1e6),
                     meta={"reason": sig["reason"]})
             elif sig["action"] == "taker_buy":
-                self.broker.taker_buy(m.slug, sig["side"], sig["px"],
-                                      sig.get("avail", 0), size,
-                                      meta={"reason": sig["reason"]})
+                self.broker.taker_buy(
+                    m.slug, sig["side"], sig["px"], sig.get("avail", 0),
+                    size,
+                    meta={"reason": sig["reason"],
+                          "oracle_age_s": sig.get("oracle_age_s"),
+                          "z": sig.get("z"), "ev_est": sig.get("ev_est")})
 
     async def decide_loop(self):
         """1s safety net. The primary path is event-driven off book updates
