@@ -34,61 +34,79 @@ VOL_SD_MAX = 5e-4
 
 
 class OnlineVol:
-    """EWMA variance of 1s log returns, updated on each Binance second.
+    """One-hour TRAILING standard deviation of 1s log returns.
 
-    Two properties matter for correctness, both learned the hard way:
+    This must be the SAME estimator the edge was measured with. The
+    backtest computes sigma as
 
-    1. BIAS CORRECTION. A plain EWMA with a 300s halflife seeded from one
-       observation needs ~20-30 minutes to converge. A bot restarted two
-       minutes ago was running with var 22x too small, which inflates z by
-       22x and makes every market look certain. The effective weight is
-       therefore max(alpha, 1/n), so the estimator IS the running mean
-       until the EWMA horizon takes over.
-    2. WARM START. `seed()` initialises straight from recent 1s klines so
-       the estimator is correct from the first tick after a restart.
+        log(px).diff().rolling(3600, min_periods=600).std() * spot
+
+    on Binance 1s klines. An earlier version of this class used a 300s
+    halflife EWMA instead. That is a different estimator, and live it read
+    2.6e-6 against a two-day actual of 1.34e-5 -- 5x low, which inflates z
+    5x and makes the bot fire on noise. Sigma sits in the DENOMINATOR of z,
+    so under-estimating it is the dangerous direction.
+
+    So: keep the last 3600 one-second returns and take their sample sd
+    (ddof=1, matching pandas). `seed()` fills the window from recent klines
+    so a restart is correct from the first tick rather than after an hour.
     """
 
-    def __init__(self, halflife_s=300.0):
-        self.alpha = 1 - math.exp(math.log(0.5) / halflife_s)
-        self.var = None
+    WINDOW = 3600
+    MIN_OBS = 600
+
+    def __init__(self, window_s=WINDOW):
+        self.window = int(window_s)
+        self.rets = deque(maxlen=self.window)
         self.last_sec = None
         self.last_px = None
-        self.n = 0
+        self._override = None
 
-    def seed(self, var, n=600):
-        """Warm start from a realised variance computed offline."""
-        if var and var > 0:
-            self.var = float(var)
-            self.n = int(n)
+    def force_var(self, v):
+        """Pin the variance. Reconciliation only -- never call in live use."""
+        self._override = float(v) if v is not None else None
+
+    @property
+    def var(self):
+        if self._override is not None:
+            return self._override
+        n = len(self.rets)
+        if n < self.MIN_OBS:
+            return None
+        m = sum(self.rets) / n
+        return sum((r - m) ** 2 for r in self.rets) / (n - 1)
+
+    def seed(self, returns):
+        """Warm start from a sequence of 1s log returns."""
+        for r in returns:
+            if math.isfinite(r):
+                self.rets.append(float(r))
         return self.var
 
     def ok(self):
         """True when the estimate is inside the plausibility band."""
-        return (self.var is not None and self.var > 0
-                and VOL_SD_MIN <= math.sqrt(self.var) <= VOL_SD_MAX)
+        v = self.var
+        return v is not None and v > 0 and VOL_SD_MIN <= math.sqrt(v) <= VOL_SD_MAX
 
     def update(self, sec, px):
-        """Update only on second boundaries so the estimator matches the
-        backtest's strict 1s-grid EWMA (audit item: identical inputs)."""
-        if self.last_sec is None:
-            self.last_sec = sec
-            self.last_px = px
+        """Append one 1s log return per elapsed second boundary."""
+        if self.last_sec is None or self.last_px is None or px <= 0:
+            self.last_sec, self.last_px = sec, px
             return
         if sec <= self.last_sec:
             self.last_px = px          # track latest price within the second
             return
         dt = sec - self.last_sec
         r = math.log(px / self.last_px)
-        r2_per_s = (r * r) / dt
-        for _ in range(min(int(dt), 10)):
-            self.n += 1
-            if self.var is None:
-                self.var = r2_per_s
-            else:
-                a = max(self.alpha, 1.0 / self.n)
-                self.var += a * (r2_per_s - self.var)
-        self.last_sec = sec
-        self.last_px = px
+        if dt > 1:
+            # spread a multi-second gap over its seconds so the window still
+            # represents one return per second
+            r /= math.sqrt(dt)
+            for _ in range(min(int(dt), 10)):
+                self.rets.append(r)
+        else:
+            self.rets.append(r)
+        self.last_sec, self.last_px = sec, px
 
 
 class GzPricer:
@@ -169,7 +187,7 @@ class BotState:
         self.oracle_px = None
         self.oracle_round_ts_us = 0
         self.oracle_us = 0
-        self.vol = OnlineVol(300.0)
+        self.vol = OnlineVol()
         self.basis = deque(maxlen=600)   # (oracle/binance) samples, 1/s
         self.markets = {}                # slug -> MarketState
         self.pricer = GzPricer()
@@ -180,29 +198,40 @@ class BotState:
         self.backfill_oracle()
         self.seed_vol()
 
-    def seed_vol(self, symbol="BTCUSDT", bars=1000):
+    def seed_vol(self, symbol="BTCUSDT", bars=3600):
         """Warm-start the vol estimator from recent public 1s klines.
 
-        Free and unauthenticated. The endpoint caps at 1000 bars, so this
-        is ~16 minutes of realised variance -- noisier than the EWMA's 300s
-        halflife target but in the right order of magnitude, which is the
-        whole point: it removes the ~30-minute blind spot a cold EWMA has
-        after every restart. Live updates take over from the first tick.
+        Free and unauthenticated. The endpoint caps at 1000 bars per call,
+        so this pages backwards until the full one-hour window is filled --
+        the window has to match the backtest's rolling(3600), not merely be
+        the right order of magnitude. Live updates take over from the first
+        tick and roll the oldest returns off the back.
         """
         try:
             import requests
-            r = requests.get(
-                "https://data-api.binance.vision/api/v3/klines",
-                params={"symbol": symbol, "interval": "1s",
-                        "limit": min(bars, 1000)},
-                headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-            if r.status_code != 200:
+            end = None
+            chunks = []
+            while sum(len(c) for c in chunks) < bars:
+                params = {"symbol": symbol, "interval": "1s", "limit": 1000}
+                if end is not None:
+                    params["endTime"] = end
+                r = requests.get(
+                    "https://data-api.binance.vision/api/v3/klines",
+                    params=params, headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=20)
+                if r.status_code != 200:
+                    break
+                js = r.json()
+                if not js:
+                    break
+                chunks.append([float(x[4]) for x in js])
+                end = int(js[0][0]) - 1
+            if not chunks:
                 return None
-            c = np.array([float(x[4]) for x in r.json()])
-            if len(c) < 120:
+            c = np.array([px for ch in reversed(chunks) for px in ch])
+            if len(c) < OnlineVol.MIN_OBS:
                 return None
-            lr = np.diff(np.log(c))
-            return self.vol.seed(float(np.var(lr)), n=len(lr))
+            return self.vol.seed(np.diff(np.log(c)))
         except Exception:  # noqa: BLE001
             return None
 

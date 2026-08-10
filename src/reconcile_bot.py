@@ -18,7 +18,7 @@ from scipy.stats import norm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from bot.state import BotState, MarketState  # noqa: E402
+from bot.state import BotState, MarketState, OnlineVol  # noqa: E402
 from bot.strategy import RollAvgEdge  # noqa: E402
 from bot.paper import PaperBroker  # noqa: E402
 
@@ -52,8 +52,7 @@ def main():
     # klines. Both must be cleared here or real ticks land inside the
     # synthetic market's strike window and the comparison is meaningless.
     st.oracle_hist.clear()
-    st.vol.var = (3.0 / base) ** 2               # 3 dollars per sqrt(sec)
-    st.vol.n = 10_000
+    st.vol.force_var((3.0 / base) ** 2)          # 3 dollars per sqrt(sec)
     st.binance_px = None
     m = MarketState("recon-5m", "tok_up", t0 * 1_000_000, t1 * 1_000_000,
                     asset_id_dn="tok_dn")
@@ -145,8 +144,7 @@ def main():
     for rate, label in ((1.0, "1 Hz"), (3.0, "3 Hz"), (1 / 3.0, "0.33 Hz")):
         st2 = BotState()
         st2.oracle_hist.clear()
-        st2.vol.var = (3.0 / base) ** 2
-        st2.vol.n = 10_000
+        st2.vol.force_var((3.0 / base) ** 2)
         st2.basis.clear()
         m2 = MarketState("recon-rate", "tok_up", t0 * 1_000_000,
                          t1 * 1_000_000, asset_id_dn="tok_dn")
@@ -167,6 +165,29 @@ def main():
               f"{drift:.2%}")
         assert drift < 0.05, f"z depends on oracle tick rate ({label})"
     print("PASS: z is invariant to oracle feed rate (time-weighted integral)")
+
+    # ---- the bot's OWN sigma must equal the backtest's estimator ---------
+    # Injecting the same sigma into both sides (as every check above does)
+    # cannot catch an estimator mismatch. The backtest uses
+    #   log(px).diff().rolling(3600, min_periods=600).std()
+    # so feed a known path through the live updater and compare.
+    import pandas as pd
+    rng2 = np.random.default_rng(11)
+    n = 5000
+    px_path = 65000 * np.exp(rng2.normal(0, 1.3e-5, n).cumsum())
+    v = OnlineVol()
+    t_epoch = 1_700_000_000
+    for i, p_ in enumerate(px_path):
+        v.update(t_epoch + i, float(p_))
+    offline = pd.Series(px_path).apply(np.log).diff().rolling(
+        3600, min_periods=600).std().iloc[-1]
+    live = np.sqrt(v.var)
+    print(f"\n  sigma  offline rolling(3600).std() {offline:.6e}")
+    print(f"  sigma  bot OnlineVol             {live:.6e}   "
+          f"rel diff {abs(live-offline)/offline:.2%}")
+    assert abs(live - offline) / offline < 0.01, \
+        "live vol estimator does not match the backtest's rolling std"
+    print("PASS: bot sigma IS the backtest's 1h trailing std of 1s returns")
 
     print("\nALL RECONCILIATION CHECKS PASSED")
 
