@@ -21,12 +21,15 @@ import argparse
 import glob
 import json
 import os
+import sys
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rollavg_edge_test import load_1s, CHANGE
+sys_path_hack = None
+from bot.calib import p_up
 
 FEE = 0.07
 W = 30
@@ -91,13 +94,46 @@ def run(a):
         tok[str(r.tok_up)] = (r.slug, True, r.t0, r.t1, r.up_win)
         tok[str(r.tok_dn)] = (r.slug, False, r.t0, r.t1, r.up_win)
 
-    files = sorted(glob.glob("data/live/clob/*.jsonl"))
-    if a.days:
-        files = [f for f in files if any(d in f for d in a.days)]
-    # per market: best ask seen on each token, keyed by second
+    # Book evidence lives in TWO places: hours already distilled by
+    # bot/prune.py into data/live/books/*.parquet, and any recent hour still
+    # sitting as raw JSONL. The pruner DELETES the raw file once distilled,
+    # so reading only data/live/clob/*.jsonl silently finds nothing on a
+    # long-running box -- which is exactly the machine this test is for.
     snaps = {}
     nread = 0
-    for f in files:
+
+    def add(aid, ts, asks):
+        m = tok.get(str(aid))
+        if m is None:
+            return
+        slug, is_up, t0, t1, up_win = m
+        rel = ts - t0
+        if not (300 - a.window <= rel < 300):
+            return
+        asks = sorted([(p, s) for p, s in asks if 0 < p < 1])
+        if not asks:
+            return
+        snaps.setdefault((slug, t0, t1, up_win), {}).setdefault(
+            ts, {})[is_up] = asks
+
+    pq = sorted(glob.glob("data/live/books/*.parquet"))
+    if a.days:
+        pq = [f for f in pq if any(d in f for d in a.days)]
+    for f in pq:
+        try:
+            d = pd.read_parquet(f)
+        except Exception:  # noqa: BLE001
+            continue
+        for r in d.itertuples():
+            nread += 1
+            add(r.asset_id, int(r.ts),
+                list(zip([float(x) for x in r.ask_px],
+                         [float(x) for x in r.ask_sz])))
+
+    raw = sorted(glob.glob("data/live/clob/*.jsonl"))
+    if a.days:
+        raw = [f for f in raw if any(d in f for d in a.days)]
+    for f in raw:
         with open(f) as fh:
             for line in fh:
                 nread += 1
@@ -109,24 +145,12 @@ def run(a):
                     continue
                 if e.get("event_type") != "book":
                     continue
-                aid = str(e.get("asset_id"))
-                m = tok.get(aid)
-                if m is None:
-                    continue
-                slug, is_up, t0, t1, up_win = m
-                ts = int(e["timestamp"]) // 1000
-                rel = ts - t0
-                if not (300 - a.window <= rel < 300):
-                    continue
-                asks = [(float(x["price"]), float(x["size"]))
-                        for x in e.get("asks", [])]
-                asks = sorted([x for x in asks if 0 < x[0] < 1])
-                if not asks:
-                    continue
-                snaps.setdefault((slug, t0, t1, up_win), {}).setdefault(
-                    ts, {})[is_up] = asks
-    print(f"read {nread:,} lines; {len(snaps):,} post-change markets with "
-          f"book snapshots in the final {a.window}s")
+                add(e.get("asset_id"), int(e["timestamp"]) // 1000,
+                    [(float(x["price"]), float(x["size"]))
+                     for x in e.get("asks", [])])
+    print(f"read {nread:,} records from {len(pq)} distilled + {len(raw)} raw "
+          f"files; {len(snaps):,} post-change markets with book snapshots "
+          f"in the final {a.window}s")
     if not snaps:
         return
 
@@ -147,12 +171,14 @@ def run(a):
             asks = bysec[ts].get(want_up)
             if not asks:
                 continue
-            fair = float(norm.cdf(abs(z)))
+            fair = float(p_up(abs(z)))   # empirical, matching bot/calib.py
             need = a.size
             cost = 0.0
             got = 0.0
             for p, sz in asks:
-                if p >= fair - a.edge_min or p >= a.max_px:
+                # The bot's VALIDATED gate takes any ask at or below
+                # max_price; the fair filter is the require_edge variant.
+                if p > a.max_px or (a.require_edge and p >= fair - a.edge_min):
                     break
                 take = min(sz, need - got)
                 if take <= 0:
@@ -200,8 +226,13 @@ def run(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--window", type=int, default=60)
-    ap.add_argument("--zmin", type=float, default=1.5)
+    # Defaults MIRROR bot/config.json's validated gate: the settle window
+    # only (w=30s on 5m), |z|>=2.0, any ask at or below max_price.
+    ap.add_argument("--window", type=int, default=30)
+    ap.add_argument("--zmin", type=float, default=2.0)
+    ap.add_argument("--require-edge", action="store_true",
+                    help="also demand empirical_fair - ask >= edge_min "
+                         "(the untested longshot variant, off in the bot)")
     ap.add_argument("--edge-min", type=float, default=0.02)
     ap.add_argument("--size", type=float, default=100)
     ap.add_argument("--max-px", type=float, default=0.97)

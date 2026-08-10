@@ -278,3 +278,54 @@ of the last five came from the live system being *consistent with itself*
 but inconsistent with the configuration the edge was measured in. Parity
 tests that inject shared inputs cannot see that class of error; only
 driving the real code path with a known answer can.
+
+## Section J — GATE 1 (ex-ante resting depth): first read, 2026-08-10
+
+Two blockers found before the 48h wait, either of which would have wasted it:
+
+11. **`depth_sim.py` read data the pruner deletes.** It globbed
+    `data/live/clob/*.jsonl`; `bot/prune.py` distils those to
+    `data/live/books/*.parquet` and removes the raw file. On a
+    long-running box — the only kind this test is for — gate 1 would have
+    silently reported "no data". Now reads distilled parquet first, plus
+    any not-yet-pruned raw hour.
+
+12. **`depth_sim` tested a different region than the bot trades.** Its
+    window defaulted to 60s and it used `Phi(z)` as fair, so it entered at
+    42-56s remaining — outside the settle window, in the +1.64c
+    day-unstable region. Defaults now mirror `bot/config.json` exactly
+    (window 30s, zmin 2.0, empirical fair, no fair filter unless
+    `--require-edge`).
+
+### What the first read says
+
+On 17-52 post-change markets of recorded book (about one hour — far too
+few to conclude, recorded here so the 48h run has a baseline):
+
+- **The flow is takeable.** Joining the tape to same-second book snapshots:
+  85% of settle-window volume is BUY prints, and **67% of them land at or
+  below the standing best ask**. Median print 0.910 vs median best ask
+  0.920. The mechanism is not broken.
+- **But the favoured side rests at 0.99 most of the time.** Restricted to
+  |z|>=2 favoured-side snapshots, the median best ask is **0.990**; only 6%
+  of snapshots carry >=10 shares at or below 0.97, and 41% of the time the
+  best ask is above 0.97 so the bot declines outright. Allowing up to 0.99
+  finds plenty of size (34% of snapshots have >=100 shares) but at a price
+  that is negative EV against the empirical fair.
+- **So the edge lives in transient dips**, not in standing liquidity: the
+  ask sits at 0.99 and drops to 0.87-0.92 in the instants around a trade.
+- With 1s polling the sim filled **1 market in 17**, 21 shares of 100.
+
+### Change made in response
+
+The bot evaluated on a 1-second timer, which walks past most of those dips.
+`bot/run.py` now evaluates **event-driven on every book update** for any
+market inside its settle window, with the 1s loop demoted to a safety net
+for quiet books. Both paths call the same `_try_market`, so they cannot
+drift apart.
+
+**This is the open risk on the whole strategy.** The tape-based ceiling
+($490/day BTC at 100 sh/market) assumes fills at print prices. If the
+realised take rate stays near 6% at ~21 shares, the true figure is an order
+of magnitude lower. Gate 1 is NOT passed; it needs the 48h with the
+event-driven build.

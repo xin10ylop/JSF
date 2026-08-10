@@ -251,11 +251,25 @@ class Bot:
         if et == "book":
             if mirror:
                 return  # book state tracked on the up token only
-            bids = [(float(x["price"]), float(x["size"]))
-                    for x in reversed(ev.get("bids", []))]
-            asks = [(float(x["price"]), float(x["size"]))
-                    for x in ev.get("asks", [])]
+            # Polymarket orders levels worst-to-best; sort explicitly rather
+            # than relying on reversed()/as-sent order.
+            bids = sorted(((float(x["price"]), float(x["size"]))
+                           for x in ev.get("bids", [])), key=lambda t: -t[0])
+            asks = sorted(((float(x["price"]), float(x["size"]))
+                           for x in ev.get("asks", [])), key=lambda t: t[0])
             self.state.on_book(aid, bids, asks, ev.get("timestamp"))
+            # Evaluate IMMEDIATELY on a book change inside the settle window.
+            # The favoured side rests at ~0.99 most of the time and dips to
+            # 0.87-0.92 only in the instants around a trade; a 1s polling
+            # loop walks past most of those. Measured take rate on recorded
+            # books with 1s polling was 1 market in 17.
+            for m in self.state.markets.values():
+                if m.asset_id_up != aid:
+                    continue
+                rem = (m.t1_us - now_us()) / 1e6
+                if 0 < rem <= m.w:
+                    self._try_market(m)
+                break
         elif et == "last_trade_price":
             px = float(ev["price"])
             sz = float(ev.get("size", 0))
@@ -296,51 +310,56 @@ class Bot:
                 "stale": {k: round(v, 1) for k, v in s.staleness().items()},
                 "detail": mk})
 
+    def _try_market(self, m):
+        """Evaluate every strategy for one market and route any signal.
+
+        Shared by the 1s safety-net loop and the event-driven book handler,
+        so both paths take exactly the same decision.
+        """
+        st = self.state.staleness()
+        book_age = (now_us() - m.book_us) / 1e6 if m.book_us else 1e9
+        if not self.risk.inputs_ok(st, book_age):
+            return
+        for strat in self.strategies:
+            sig = strat.evaluate(self.state, m, now_us())
+            if not sig:
+                continue
+            pos = self.broker.positions.get((m.slug, sig["side"]),
+                                            {"shares": 0, "cost": 0})
+            nmk = len({k[0] for k, v in self.broker.positions.items()
+                       if v["shares"] > 0})
+            px = sig.get("level", sig.get("px", 0.5))
+            size = self.risk.size_ok(pos["shares"], pos["cost"],
+                                     sig["size"], px, nmk)
+            if size <= 0:
+                continue
+            self.log_decision({"kind": "signal", "slug": m.slug,
+                               **{k: v for k, v in sig.items()
+                                  if k != "action"},
+                               "action": sig["action"], "sized": size})
+            if sig["action"] == "ladder":
+                for lvl in sig["levels"]:
+                    self.broker.maker_buy(m.slug, m.asset_id_up, sig["side"],
+                                          lvl, size, 200.0, m.t1_us,
+                                          meta={"reason": sig["reason"]})
+            elif sig["action"] == "maker_buy":
+                self.broker.maker_buy(
+                    m.slug, m.asset_id_up, sig["side"], sig["level"], size,
+                    sig.get("queue_ahead", 0),
+                    now_us() + int(sig.get("ttl_s", 20) * 1e6),
+                    meta={"reason": sig["reason"]})
+            elif sig["action"] == "taker_buy":
+                self.broker.taker_buy(m.slug, sig["side"], sig["px"],
+                                      sig.get("avail", 0), size,
+                                      meta={"reason": sig["reason"]})
+
     async def decide_loop(self):
+        """1s safety net. The primary path is event-driven off book updates
+        (see _on_clob); this catches markets whose book has gone quiet."""
         while True:
             await asyncio.sleep(1.0)
-            st = self.state.staleness()
             for m in list(self.state.markets.values()):
-                book_age = (now_us() - m.book_us) / 1e6 if m.book_us else 1e9
-                if not self.risk.inputs_ok(st, book_age):
-                    continue
-                for strat in self.strategies:
-                    sig = strat.evaluate(self.state, m, now_us())
-                    if not sig:
-                        continue
-                    pos = self.broker.positions.get((m.slug, sig["side"]),
-                                                    {"shares": 0, "cost": 0})
-                    nmk = len({k[0] for k, v in
-                               self.broker.positions.items()
-                               if v["shares"] > 0})
-                    px = sig.get("level", sig.get("px", 0.5))
-                    size = self.risk.size_ok(pos["shares"], pos["cost"],
-                                             sig["size"], px, nmk)
-                    if size <= 0:
-                        continue
-                    self.log_decision({"kind": "signal", "slug": m.slug,
-                                       **{k: v for k, v in sig.items()
-                                          if k != "action"},
-                                       "action": sig["action"],
-                                       "sized": size})
-                    if sig["action"] == "ladder":
-                        for lvl in sig["levels"]:
-                            self.broker.maker_buy(
-                                m.slug, m.asset_id_up, sig["side"], lvl,
-                                size, 200.0,
-                                m.t1_us,
-                                meta={"reason": sig["reason"]})
-                    elif sig["action"] == "maker_buy":
-                        self.broker.maker_buy(
-                            m.slug, m.asset_id_up, sig["side"], sig["level"],
-                            size, sig.get("queue_ahead", 0),
-                            now_us() + int(sig.get("ttl_s", 20) * 1e6),
-                            meta={"reason": sig["reason"]})
-                    elif sig["action"] == "taker_buy":
-                        self.broker.taker_buy(
-                            m.slug, sig["side"], sig["px"],
-                            sig.get("avail", 0), size,
-                            meta={"reason": sig["reason"]})
+                self._try_market(m)
 
     async def discovery_loop(self):
         async with aiohttp.ClientSession() as session:

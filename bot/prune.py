@@ -46,10 +46,16 @@ def distil(path, window, keep_levels=3):
             r15 = 900 - (ts % 900)
             if min(r5, r15) > window:
                 continue
-            bids = [(float(x["price"]), float(x["size"]))
-                    for x in e.get("bids", [])][:keep_levels]
-            asks = [(float(x["price"]), float(x["size"]))
-                    for x in e.get("asks", [])][:keep_levels]
+            # Polymarket orders book levels WORST-to-BEST, so never slice
+            # from the front. Sort explicitly to best-first and keep the top
+            # levels, rather than depending on the recorder's [-3:] having
+            # already done it.
+            bids = sorted(((float(x["price"]), float(x["size"]))
+                           for x in e.get("bids", [])),
+                          key=lambda t: -t[0])[:keep_levels]
+            asks = sorted(((float(x["price"]), float(x["size"]))
+                           for x in e.get("asks", [])),
+                          key=lambda t: t[0])[:keep_levels]
             if not bids and not asks:
                 continue
             rows.append({
