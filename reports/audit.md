@@ -362,3 +362,22 @@ event-driven build.
     marginal model says "negative" realise **+3.07c**. So `require_edge`
     must stay off, and the logged `ev_est` is an honest summary statistic,
     NOT a per-trade fair value. Do not turn it into a filter.
+
+### I.9 Pre-unattended safety review
+
+15. **Both sides of one market could be held simultaneously.** Position caps
+    are keyed by `(slug, side)`, so the 300-share / $200 per-market limits
+    apply to Up and Down independently. `z` can flip sign late in a window
+    (as rem -> 0 the margin M can cross zero), which would have the bot buy
+    Up at ~0.9 and then Down at ~0.9 in the same market: ~1.90 paid for a
+    guaranteed 1.00 payoff, a structural loss no limit would catch.
+    `bot/run.py` now refuses any entry on a side whose opposite is already
+    held, and logs `blocked_opposite_side`.
+
+16. **The kill switch never reset.** `Risk.on_settle_pnl` zeroed `day_pnl`
+    on a date change but left `killed` set, so the first day that breached
+    the DAILY loss limit stopped the bot permanently — in paper mode,
+    silently ending the measurement run. Now cleared on rollover.
+
+Bug tally: 16. Running the system and reading its output has found more
+real defects than any amount of re-reading the backtest would have.

@@ -28,8 +28,12 @@ class Risk:
     def on_settle_pnl(self, pnl):
         d = time.strftime("%Y-%m-%d")
         if d != self.day:
+            # A DAILY loss limit must reset daily. Without clearing `killed`
+            # the first bad day stops the bot permanently and, in paper
+            # mode, silently ends the measurement run.
             self.day = d
             self.day_pnl = 0.0
+            self.killed = False
         self.day_pnl += pnl
         if self.day_pnl < -abs(self.daily_loss_limit):
             self.killed = True

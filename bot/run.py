@@ -394,6 +394,17 @@ class Bot:
             sig = strat.evaluate(self.state, m, now_us())
             if not sig:
                 continue
+            # Never hold BOTH sides of the same market. z can flip sign
+            # late in the window (as rem -> 0 the margin can cross zero),
+            # and the per-market caps are keyed by (slug, side), so nothing
+            # else would stop the bot buying Up at ~0.9 and then Down at
+            # ~0.9 -- paying ~1.90 for a guaranteed 1.00 payoff.
+            other = "Down" if sig["side"] == "Up" else "Up"
+            if self.broker.positions.get((m.slug, other), {}).get("shares", 0) > 0:
+                self.log_decision({"kind": "blocked_opposite_side",
+                                   "slug": m.slug, "side": sig["side"],
+                                   "holding": other})
+                continue
             pos = self.broker.positions.get((m.slug, sig["side"]),
                                             {"shares": 0, "cost": 0})
             nmk = len({k[0] for k, v in self.broker.positions.items()
