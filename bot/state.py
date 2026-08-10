@@ -24,14 +24,48 @@ def now_us():
     return int(time.time() * 1_000_000)
 
 
+# Plausibility band for the 1s log-return sd of a major crypto pair.
+# Measured on BTC 1s klines (2026-08-08..09): sd 1.34e-5, and the rolling
+# 1h sd spans 4.7e-6 (5th pct) to 2.2e-5 (95th). Anything outside this band
+# by an order of magnitude is a broken estimator, not a quiet market, and
+# must not be allowed to inflate z.
+VOL_SD_MIN = 1e-6
+VOL_SD_MAX = 5e-4
+
+
 class OnlineVol:
-    """EWMA variance of 1s log returns, updated on each Binance second."""
+    """EWMA variance of 1s log returns, updated on each Binance second.
+
+    Two properties matter for correctness, both learned the hard way:
+
+    1. BIAS CORRECTION. A plain EWMA with a 300s halflife seeded from one
+       observation needs ~20-30 minutes to converge. A bot restarted two
+       minutes ago was running with var 22x too small, which inflates z by
+       22x and makes every market look certain. The effective weight is
+       therefore max(alpha, 1/n), so the estimator IS the running mean
+       until the EWMA horizon takes over.
+    2. WARM START. `seed()` initialises straight from recent 1s klines so
+       the estimator is correct from the first tick after a restart.
+    """
 
     def __init__(self, halflife_s=300.0):
         self.alpha = 1 - math.exp(math.log(0.5) / halflife_s)
         self.var = None
         self.last_sec = None
         self.last_px = None
+        self.n = 0
+
+    def seed(self, var, n=600):
+        """Warm start from a realised variance computed offline."""
+        if var and var > 0:
+            self.var = float(var)
+            self.n = int(n)
+        return self.var
+
+    def ok(self):
+        """True when the estimate is inside the plausibility band."""
+        return (self.var is not None and self.var > 0
+                and VOL_SD_MIN <= math.sqrt(self.var) <= VOL_SD_MAX)
 
     def update(self, sec, px):
         """Update only on second boundaries so the estimator matches the
@@ -47,10 +81,12 @@ class OnlineVol:
         r = math.log(px / self.last_px)
         r2_per_s = (r * r) / dt
         for _ in range(min(int(dt), 10)):
+            self.n += 1
             if self.var is None:
                 self.var = r2_per_s
             else:
-                self.var += self.alpha * (r2_per_s - self.var)
+                a = max(self.alpha, 1.0 / self.n)
+                self.var += a * (r2_per_s - self.var)
         self.last_sec = sec
         self.last_px = px
 
@@ -142,6 +178,33 @@ class BotState:
         # contract averages are read from here, not accumulated per market.
         self.oracle_hist = deque(maxlen=4000)   # ~1/s -> >1h of history
         self.backfill_oracle()
+        self.seed_vol()
+
+    def seed_vol(self, symbol="BTCUSDT", bars=1000):
+        """Warm-start the vol estimator from recent public 1s klines.
+
+        Free and unauthenticated. The endpoint caps at 1000 bars, so this
+        is ~16 minutes of realised variance -- noisier than the EWMA's 300s
+        halflife target but in the right order of magnitude, which is the
+        whole point: it removes the ~30-minute blind spot a cold EWMA has
+        after every restart. Live updates take over from the first tick.
+        """
+        try:
+            import requests
+            r = requests.get(
+                "https://data-api.binance.vision/api/v3/klines",
+                params={"symbol": symbol, "interval": "1s",
+                        "limit": min(bars, 1000)},
+                headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            if r.status_code != 200:
+                return None
+            c = np.array([float(x[4]) for x in r.json()])
+            if len(c) < 120:
+                return None
+            lr = np.diff(np.log(c))
+            return self.vol.seed(float(np.var(lr)), n=len(lr))
+        except Exception:  # noqa: BLE001
+            return None
 
     def backfill_oracle(self, symbol="btc/usd", lookback_s=1800):
         """Seed the oracle ring buffer from the recorder's RTDS log.
@@ -269,8 +332,8 @@ class BotState:
         spot = self.spot_adj()
         if K is None or spot is None or t < 0 or t >= T:
             return None
-        if self.vol.var is None or self.vol.var <= 0:
-            return None
+        if not self.vol.ok():
+            return None                      # implausible vol -> do not price
         sigma = (self.vol.var ** 0.5) * spot     # dollar vol per sqrt(sec)
         r_sum, _ = self.settle_sum_so_far(m, t_us)
         R = float(r_sum)                          # price-seconds (1 tick/sec)
@@ -289,7 +352,7 @@ class BotState:
         spot = self.spot_adj()
         if K is None or spot is None or t >= T:
             return None
-        if self.vol.var is None or self.vol.var <= 0:
+        if not self.vol.ok():
             return None
         sigma = (self.vol.var ** 0.5) * spot
         rem = T - t

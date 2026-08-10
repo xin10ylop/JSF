@@ -48,7 +48,12 @@ def main():
     path = {s: base + steps[i] for i, s in enumerate(secs)}
 
     st = BotState()
+    # BotState warm-starts from the recorder's real oracle log and from live
+    # klines. Both must be cleared here or real ticks land inside the
+    # synthetic market's strike window and the comparison is meaningless.
+    st.oracle_hist.clear()
     st.vol.var = (3.0 / base) ** 2               # 3 dollars per sqrt(sec)
+    st.vol.n = 10_000
     st.binance_px = None
     m = MarketState("recon-5m", "tok_up", t0 * 1_000_000, t1 * 1_000_000,
                     asset_id_dn="tok_dn")

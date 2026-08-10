@@ -116,3 +116,63 @@ Measured 2026-08-06 against the published Aug-5 tape:
 - **Operational note**: this research container restarts frequently and
   kills the processes; continuous measurement belongs on the droplet
   (deploy/droplet_setup.sh, systemd auto-restart).
+
+## Section I — audit of the post-2026-08-07 endgame strategy (2026-08-10)
+
+### I.1 Bugs this audit caught
+
+1. **My own settlement rule was wrong.** The first reading of the Aug-7
+   change assumed a FORWARD strike (mean over the first w seconds inside
+   the window). A horse race on 2,880 settled outcomes says the strike is
+   TRAILING (`[t0-w, t0)`): 0.9503 accuracy vs 0.8943 for the forward
+   variant and 0.8904 for the old rule; 82.7% correct on the 266 markets
+   where the trailing and old rules disagree. Corrected in
+   `src/rollavg_pricer.py`, `bot/state.py`.
+2. **The paper broker was settling on the PRE-change rule.**
+   `run.py::_settle_result` compared a single end price to a single strike.
+   Every paper P&L would have been mis-scored. Now reads both trailing
+   averages off the oracle ring buffer.
+3. **One second of look-ahead in the backtest.** Binance 1s klines are
+   indexed by OPEN time, so the bar at second s closes at s+1. The spot
+   lookup was peeking one second ahead — material when rem < 30s. Fixed by
+   re-indexing to close time; the edge fell from +4.07c to +3.57c, and the
+   corrected figure is the one reported.
+4. **The live vol estimator was 22x too small after a restart.** A 300s
+   halflife EWMA seeded from a single observation needs ~30 minutes to
+   converge; two minutes after restart the bot had sd 6.07e-7 against a
+   true 1.34e-5, which inflates z by 22x and makes every market look
+   certain (observed live: `z=27.96, fair=1.0` against a book at 0.47/0.99).
+   Three fixes: bias-corrected weight `max(alpha, 1/n)`, a warm start from
+   public 1s klines, and a plausibility band (`OnlineVol.ok()`) that
+   refuses to price outside sd in [1e-6, 5e-4]. **This was caught only
+   because the health heartbeat logs every pricer input** — a silent bot
+   and a bot trading on garbage look identical without it.
+5. **A negative-span prefix sum** silently produced garbage S before the
+   settle window opened. It was NaN-guarded (so results were never wrong),
+   but it hid the pre-window region entirely; now handled explicitly.
+
+### I.2 Backtest / live parity
+
+`src/reconcile_bot.py` drives a real `BotState` with synthetic feeds and
+asserts:
+
+- strike matches the offline formula to 1.5e-11
+- z and fair are bit-identical to the backtest across rem = 120..2s
+  (worst |dz| 9.5e-11, worst |dfair| 2.1e-14)
+- paper settlement uses the verified trailing-TWAP contract
+- the strategy gate fires and the paper broker charges exactly
+  `0.07*p*(1-p)`
+
+All checks pass.
+
+### I.3 What is still NOT verified
+
+- **Ex-ante resting depth.** The edge is measured against prints that
+  cleared, and print sizes bound depth from below (7.5% of qualifying
+  prints are >=100 shares; median market carries 173 qualifying shares).
+  But the order-book recorder was down for most of Aug 7-9, leaving only 4
+  post-change markets of resting-depth evidence. `src/depth_sim.py` is the
+  true ex-ante test and is waiting on recorder uptime. **Do not size up
+  before this passes.**
+- **Live paper fills.** Zero to date on the corrected build.
+- **Only 3 post-change days**, and the alt coins are already decaying.
