@@ -58,6 +58,8 @@ class Bot:
         self.n_eval_err = 0
         self.n_eval = 0
         self.n_signal = 0
+        self.started_us = now_us()   # so a health line can be
+                                     # attributed to THIS process
 
     def log_decision(self, obj):
         obj["t_us"] = now_us()
@@ -384,12 +386,18 @@ class Bot:
     async def health_loop(self):
         """Periodic snapshot of every input the pricer needs.
 
+        Emits quickly after start, then every 30s. Waiting a full 30s first
+        means `status.py` run right after a restart reads the PREVIOUS
+        process's line and attributes it to the new build.
+
         Without this a silent bot is indistinguishable from a bot with no
         signals: fair() returns None if any of oracle history, basis or vol
         is missing, and each has a different fix.
         """
+        first = True
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(5 if first else 30)
+            first = False
             s = self.state
             mk = {}
             for slug, m in list(s.markets.items())[:6]:
@@ -406,6 +414,7 @@ class Bot:
                                    if m.book_us else None)}
             self.log_decision({
                 "kind": "health", "markets": len(s.markets),
+                "uptime_s": round((now_us() - self.started_us) / 1e6, 1),
                 "pending_settle": len(self.pending),
                 "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
                 "evals": self.n_eval, "eval_errs": self.n_eval_err,

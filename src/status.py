@@ -39,9 +39,15 @@ def main():
         print("no health line yet — bot may still be starting")
         return
     age = time.time() - d["t_us"] / 1e6
-    print(f"=== HEALTH  ({age:.0f}s old) ===")
+    up = d.get("uptime_s")
+    print(f"=== HEALTH  ({age:.0f}s old"
+          + (f", bot up {up:.0f}s" if up is not None else "") + ") ===")
     if age > 120:
         print("  !! STALE: no health line in over 2 minutes — bot may be down")
+    if up is not None and up < 600:
+        print(f"  !! WARM-UP: bot up only {up:.0f}s. The oracle buffer needs "
+              f"~10 min to reach back far enough to price a market that is "
+              f"REACHING expiry. Counters are not yet meaningful.")
     print(f"  feed      clob_evs={d.get('clob_evs'):,} "
           f"errs={d.get('clob_errs')}  consumer alive={d.get('clob_errs') == 0}")
     rate = d.get("oracle_rate")
