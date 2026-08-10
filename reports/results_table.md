@@ -90,3 +90,24 @@ two-sided); "Book grid" = real book_snapshot_5 sample (~1000 mkts/family).
 | H38e | Executable: fade-the-trend at the open | 13,503 mkts, |score|=4 | TAKER -0.5 to -1.9c (fee exceeds edge). MAKER assumed-fill +1.1 to +2.4c, but **REAL fill sim: -2.06c train / -3.20c test** at 84% fill rate | NEGATIVE — 4th family to hit the same adverse-selection wall |
 | H38f | Trade the signal on the UNDERLYING instead (true AHL form) | 88,618 5m bars | **Mean next-5m return ~0** (-0.05 to -0.21 bps, t=-0.4/-1.9) even though the SIGN shifts 3.9pp. Signal moves the median, not the mean. Turnover 0.4/bar -> -390% ann. at 1bp cost | NEGATIVE — and explains why a binary is the RIGHT instrument for a sign signal |
 | **H39** | **OPEN LEAD**: the reversal is universal and STRONGER on ETH/SOL, but only BTC's book was tested for whether it prices it. If a thinner coin's book fades less than BTC's while its true reversal is 38% larger, the residual could exceed the 1.75c fee and be taker-viable | needs ETH/SOL tapes (Telonex quota exhausted) | Threshold to clear: residual (actual - mid) > ~1.75c at mid prices. BTC's residual was 1.2c | **UNTESTED — highest-value next test** |
+
+## Round 4 — free public data (no Telonex quota) and the post-2026-08-07 contract
+
+Unlock: three unauthenticated Polymarket endpoints carry everything needed —
+gamma `/markets?slug=..&closed=true` (100 slugs/req, outcomes + resolutionSource),
+`clob/prices-history`, and `data-api/trades` (the full trade tape WITH wallet ids).
+229,530 resolved 5m markets across btc/eth/sol/xrp/doge, 2026-03-01..08-09.
+
+| # | Hypothesis | Result | Verdict |
+|---|---|---|---|
+| H40 | Settlement change datable from venue metadata | `resolutionSource` flips `<coin>-usd` -> `<coin>-usd-twap-30s-streams` on exactly 2026-08-07, all 5 coins simultaneously | CONFIRMED |
+| H41 | AHL reversal is universal and strongest on ETH | spread P(Up\|score<0)-P(Up\|score>0): ETH +7.05pp (t=13.6, train 7.06 / test 7.06), SOL +4.95, DOGE +4.34, XRP +3.48, BTC +3.34. n=229K | CONFIRMED (signal) |
+| H39 | Alt books fail to price the reversal | Books already fade it at open (bid/ask 0.51/0.53 at score -4 vs 0.47/0.49 at +4). Taker EV ~0, CIs span 0 | REFUTED |
+| H42 | Wallet skill persists out of sample | Spearman +0.43; top decile +4.44c/sh in test vs bottom -0.76c | CONFIRMED |
+| H43 | Informed wallets are copyable | -6.77c/share at 1s lag; their edge is price selection, not direction | REFUTED |
+| H44 | Venue-wide maker alpha exists | 66.6M shares: taker gross +0.09c, net -0.76c => maker gross **-0.09c**. Cell map train/test corr **-0.35** | REFUTED |
+| H45 | The new rule is trailing/trailing, not forward-strike | Accuracy post-change: trailing/trailing **0.9503** vs old 0.8904 vs forward-strike 0.8943. Window scan peaks exactly at w=30s. On 266 disagreeing markets trailing-TWAP right **82.7%** vs old 17.3% | **CONFIRMED — corrects my own earlier assumption** |
+| H46 | The book has NOT re-priced the new contract | Endgame taker EV vs real prints, last 60s, \|z\|>=2: **+3.04c/share** (per-day SE 0.07, 3 days, 2.56M shares). Pre-change control on identical machinery: **+0.19c**. All 15 coin x day cells positive | **FOUND — pending depth + live confirmation** |
+
+Settlement rule (verified): `Up iff mean(P over [t1-30, t1)) >= mean(P over [t0-30, t0))`.
+The strike is BACKWARD-looking and known at t0.
