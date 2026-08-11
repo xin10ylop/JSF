@@ -71,9 +71,29 @@ def pnl_by_bot():
     if "t_us" in sc and sc.t_us.max() > 0:
         span_h = (sc.t_us.max() - sc.t_us.min()) / 1e6 / 3600.0
     if span_h > 0.25:
+        mkt_day = sc.slug.nunique() / span_h * 24
         print(f"\n  run rate: ${sc.pnl.sum() / span_h:+,.0f}/hour = "
               f"${sc.pnl.sum() / span_h * 24:+,.0f}/day over {span_h:.1f}h "
               f"of fills   (tape projection: ~$2,100/day at these caps)")
+        # Coverage is the other half of the run rate and the one most
+        # likely to be leaving money behind: the tape says ~238 btc
+        # markets a day carry a qualifying signal, and the old host never
+        # got past ~29.
+        print(f"  coverage: {sc.slug.nunique()} markets traded = "
+              f"{mkt_day:,.0f}/day   (tape: ~238/day for btc alone, "
+              f"~700/day across five coins)")
+    # 5m and 15m are different contracts (w=30s vs 60s) measured
+    # separately: 5m ~$2,236/day, 15m ~$362/day. Keep them apart live too,
+    # or a weak family hides inside a strong one.
+    fam = sc.slug.str.extract(r"-updown-(\d+m)-", expand=False)
+    if fam.nunique() > 1:
+        print("\n  by family:")
+        for f_ in sorted(fam.dropna().unique()):
+            x = sc[fam == f_]
+            w_ = x.shares.sum()
+            print(f"    {f_:<5} {len(x):>4} fills  {w_:>8,.0f} sh  "
+                  f"{x.pnl.sum() / w_ * 100:>+6.2f}c/sh  "
+                  f"${x.pnl.sum():>+8.2f}  {x.slug.nunique()} mkts")
     g = sc.groupby("slug").agg(pnl=("pnl", "sum"), sh=("shares", "sum"))
     tcl = None
     if len(g) > 2:
