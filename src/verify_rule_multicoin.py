@@ -61,21 +61,40 @@ def check(coin, fam, era):
 
     t0 = m.t0.values.astype("int64")
     t1 = m.t1.values.astype("int64")
-    twap = mean_over(t1 - w, t1) >= mean_over(t0 - w, t0)   # the new rule
-    endp = at(t1) >= at(t0)                                 # the old rule
-    ok = np.isfinite(mean_over(t1 - w, t1)) & np.isfinite(at(t1))
+    # The market description says: Up if "the TWAP ... of the time range
+    # specified in the title" >= "the price at the beginning of that
+    # range", read off the btc-usd-twap-{30,60}s stream. Both halves admit
+    # two readings, so test all four rather than assume the one we shipped.
+    #   end_twap   value of the twap-Ws stream AT t1  = mean(P,[t1-w,t1))
+    #   range_twap TWAP across the whole window        = mean(P,[t0,t1))
+    #   k_twap     value of the stream AT t0           = mean(P,[t0-w,t0))
+    #   k_spot     raw spot at t0
+    end_twap = mean_over(t1 - w, t1)
+    range_twap = mean_over(t0, t1)
+    k_twap = mean_over(t0 - w, t0)
+    k_spot = at(t0)
+    cands = {
+        "endTwap>=kTwap": end_twap >= k_twap,        # what we shipped
+        "rangeTwap>=kTwap": range_twap >= k_twap,
+        "endTwap>=spot0": end_twap >= k_spot,
+        "rangeTwap>=spot0": range_twap >= k_spot,
+        "spot1>=spot0": at(t1) >= k_spot,            # the pre-change rule
+    }
+    ok = np.isfinite(end_twap) & np.isfinite(range_twap) & np.isfinite(k_spot)
     won = m.up_win.values.astype(bool)
     if ok.sum() < 30:
         return None
-    disagree = ok & (twap != endp)
-    return {
-        "n": int(ok.sum()),
-        "twap": float((twap[ok] == won[ok]).mean()),
-        "end": float((endp[ok] == won[ok]).mean()),
-        "n_dis": int(disagree.sum()),
-        "twap_wins": (float((twap[disagree] == won[disagree]).mean())
-                      if disagree.sum() else float("nan")),
-    }
+    out = {"n": int(ok.sum())}
+    for name, pred in cands.items():
+        out[name] = float((pred[ok] == won[ok]).mean())
+    # head-to-head: on markets where OUR rule and the range reading differ,
+    # which one matches the venue?
+    a_, b_ = cands["endTwap>=kTwap"], cands["rangeTwap>=kTwap"]
+    dis = ok & (a_ != b_)
+    out["n_dis"] = int(dis.sum())
+    out["ours_wins"] = (float((a_[dis] == won[dis]).mean())
+                        if dis.sum() else float("nan"))
+    return out
 
 
 def main():
@@ -89,18 +108,21 @@ def main():
     print("  the decisive column is the LAST one: on markets where the two "
           "rules disagree,\n  how often is trailing-TWAP the one that is "
           "right? >0.5 means TWAP governs.\n")
-    print(f"{'coin':<6}{'fam':<5}{'era':<6}{'n':>7}{'twap':>8}{'end':>8}"
-          f"{'disagree':>10}{'twap right':>12}")
+    cols = ["endTwap>=kTwap", "rangeTwap>=kTwap", "endTwap>=spot0",
+            "rangeTwap>=spot0", "spot1>=spot0"]
+    hdr = "".join(f"{c:>18}" for c in cols)
+    print(f"{'coin':<6}{'fam':<5}{'era':<6}{'n':>7}{hdr}"
+          f"{'disagree':>10}{'ours right':>12}")
     for coin in a.coins.split(","):
         for fam in a.fams.split(","):
             for era in ("pre", "post"):
                 r = check(coin, fam, era)
                 if r is None:
                     continue
-                tw = ("  n/a" if not np.isfinite(r["twap_wins"])
-                      else f"{r['twap_wins']:.3f}")
-                print(f"{coin:<6}{fam:<5}{era:<6}{r['n']:>7,}"
-                      f"{r['twap']:>8.4f}{r['end']:>8.4f}"
+                tw = ("  n/a" if not np.isfinite(r["ours_wins"])
+                      else f"{r['ours_wins']:.3f}")
+                vals = "".join(f"{r[c]:>18.4f}" for c in cols)
+                print(f"{coin:<6}{fam:<5}{era:<6}{r['n']:>7,}{vals}"
                       f"{r['n_dis']:>10,}{tw:>12}")
 
 
