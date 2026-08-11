@@ -108,15 +108,39 @@ decay of 0.5c/share per second that is ~0.03c/share, plus ~2 points of fill
 rate from the ask-survival curve: **about 4-5% of the edge.** Worth taking
 because it is cheap, not because it changes the conclusion.
 
-**Jurisdiction beats latency when picking the host.** The Dutch KSA ordered
-Polymarket to halt Dutch operations in February 2026 and upheld it on
-appeal with recurring penalties; the site is close-only from NL and there
-are ISP-level blocks. Reports conflict on whether the CLOB API still
-accepts orders from Amsterdam. Ireland has no such action, and Dublin is
-within ~2-3 ms of Amsterdam's latency to London — so Dublin is strictly
-better: same speed, no regulatory question. Do not host in the UK either
-(matching engine region or not, it is a restricted jurisdiction for
-traders).
+**Jurisdiction beats latency when picking the host, and the current host
+fails it.** From Polymarket's own geoblock documentation, three tiers:
+
+* **OFAC-sanctioned** (IR, SY, CU, KP, Crimea/Donetsk/Luhansk) — blocked on
+  frontend and API; positions cannot even be closed.
+* **Close-only on frontend AND API** — 34 jurisdictions "including
+  Australia (AU), Belarus (BY), Belgium (BE) ... Zimbabwe (ZW)", and
+  **the United States**. Also Germany, France, Italy, Poland, UK. Existing
+  positions can be closed; new orders are rejected.
+* **Close-only on the FRONTEND ONLY, API unrestricted** — Ireland (IE),
+  Japan (JP), Malta (MT, sports only), **Netherlands (NL)**.
+
+`GET https://polymarket.com/api/geoblock` returns
+`{"blocked", "ip", "country", "region"}` for the calling IP.
+`src/check_geoblock.py` wraps it and interprets the tier.
+
+Consequences, in order of importance:
+
+1. The droplet is in **North Bergen NJ (US)** and is therefore close-only
+   on the API. It can read everything — books, Gamma, RTDS all work — so
+   the paper bot looks perfectly healthy while being on a host that could
+   never place a live order. Live trading requires moving.
+2. An earlier note here said Dublin was strictly better than Amsterdam
+   because of the Dutch KSA action. **That was wrong.** The KSA action
+   restricts the website; Polymarket's own docs put NL in the same
+   API-unrestricted tier as IE. Amsterdam is ~8 ms from London against
+   Dublin's ~11 ms, and DigitalOcean has AMS3 but no Dublin region.
+3. Do NOT host in the UK, Germany, France, Italy, Poland or Belgium
+   whatever the latency — all are close-only on the API.
+
+(Polymarket US, `docs.polymarket.us`, is a separate CFTC-regulated venue
+with its own markets and fee schedule. Nothing measured in this project
+applies to it.)
 
 **Fees — confirmed live, not inferred.** `GET gamma-api/markets` returns
 `feeSchedule = {"exponent": 1, "rate": 0.07, "takerOnly": true,
