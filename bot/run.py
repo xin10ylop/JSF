@@ -91,6 +91,10 @@ class Bot:
                          **cfg.get("fill", {})}
         self.n_sent = 0            # taker orders actually queued
         self.n_miss = 0            # orders that arrived too late
+        # WHY they missed. "the ask moved" and "our own tape cap fell below
+        # the venue's 5-share minimum" are both misses and need opposite
+        # fixes, so a bare count cannot be acted on.
+        self.n_miss_why = {"ask_gone": 0, "too_small": 0, "no_market": 0}
         self.n_reject = 0          # venue rejected on re-validation
         self.n_partial = 0         # filled less than we asked for
         self.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0}
@@ -502,6 +506,7 @@ class Bot:
                 "pending_orders": len(self.pending), "misses": self.n_miss,
                 "orders_sent": self.n_sent,
                 "venue_rejects": self.n_reject, "partials": self.n_partial,
+                "miss_why": dict(self.n_miss_why),
                 "latency_ms": self.latency_us // 1000,
                 "rejects": dict(self.n_rej),
                 "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
@@ -549,6 +554,7 @@ class Bot:
         m = self.state.markets.get(o["slug"])
         if m is None:
             self.n_miss += 1
+            self.n_miss_why["no_market"] += 1
             return
         # The venue re-validates when the hold expires and rejects on any
         # failed check; connection drops and matching-engine restarts land
@@ -561,6 +567,7 @@ class Bot:
         legs_avail = m.depth(o["side"], o["limit"])
         if not legs_avail:
             self.n_miss += 1
+            self.n_miss_why["ask_gone"] += 1
             self.log_decision({"kind": "taker_miss", "slug": o["slug"],
                                "side": o["side"], "limit": o["limit"],
                                "why": "no_depth_at_limit"})
@@ -575,6 +582,7 @@ class Bot:
             else min(budget, cap_book)
         if want < f["min_order_size"]:
             self.n_miss += 1
+            self.n_miss_why["too_small"] += 1
             self.log_decision({"kind": "taker_miss", "slug": o["slug"],
                                "side": o["side"], "limit": o["limit"],
                                "why": "below_min_size", "want": round(want, 2),
@@ -593,6 +601,7 @@ class Bot:
         got = sum(s for _p, s in legs)
         if got <= 0:
             self.n_miss += 1
+            self.n_miss_why["too_small"] += 1
             return
         if got < o["size"] - 1e-9:
             self.n_partial += 1

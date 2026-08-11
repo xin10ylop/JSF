@@ -268,7 +268,8 @@ def main():
     bt.risk = Risk({})
     bt.decisions = open("logs/reconcile_dec.jsonl", "a")
     bt.pending, bt.pending_settle, bt.n_miss = [], {}, 0
-    bt.n_reject = bt.n_partial = 0
+    bt.n_reject = bt.n_partial = bt.n_sent = 0
+    bt.n_miss_why = {"ask_gone": 0, "too_small": 0, "no_market": 0}
     bt.latency_us = 150_000
     # participation 1.0 / no tape cap / no rejects isolates the LATENCY
     # behaviour; the caps get their own checks below.
@@ -312,6 +313,8 @@ def main():
         bt.broker.positions.clear()
         bt.pending.clear()
         bt.n_miss = bt.n_reject = bt.n_partial = 0
+        for k in bt.n_miss_why:
+            bt.n_miss_why[k] = 0
         m2 = MarketState("exec-5m", "up", (t1l - 300) * 1_000_000,
                          t1l * 1_000_000, asset_id_dn="dn")
         bt.state.markets["exec-5m"] = m2

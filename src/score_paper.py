@@ -54,7 +54,7 @@ def outcomes_for(slugs, session):
     return out
 
 
-def main():
+def parser():
     ap = argparse.ArgumentParser()
     # One process per coin means one fill log per coin. Default to all of
     # them: the whole point of the multi-coin build is the aggregate, and a
@@ -82,7 +82,13 @@ def main():
     ap.add_argument("--all-latency", action="store_true",
                     help="include zero-latency fills from before the latency "
                          "model (default: only latency-realistic fills)")
-    a = ap.parse_args()
+    return ap
+
+
+def gather(a):
+    """Read every matching fill out of the logs. Shared with src/status.py
+    so the per-bot P&L table and the detailed report cost one pass, not
+    two -- and can never disagree with each other."""
     since_us = None
     if a.since:
         import datetime as _dt
@@ -99,7 +105,7 @@ def main():
     logs = [p for p in logs if os.path.exists(p)]
     if not logs:
         print("no fill log found (looked for logs/*/paper_fills.jsonl)")
-        return
+        return []
     fills = []
     for path in logs:
         # logs/<coin>/paper_fills.jsonl -> <coin>; legacy flat log -> btc
@@ -114,7 +120,12 @@ def main():
                 continue
             d["coin"] = coin
             _keep(d, a, since_us, fills)
-    _report(fills, a)
+    return fills
+
+
+def main():
+    a = parser().parse_args()
+    _report(gather(a), a)
 
 
 def _keep(d, a, since_us, fills):
@@ -135,6 +146,43 @@ def _keep(d, a, since_us, fills):
     fills.append(d)
 
 
+def score_rows(fills):
+    """Resolve every fill against the venue's settled outcome.
+
+    Split out of _report so src/status.py can render the per-bot P&L table
+    from the same pass -- one Gamma fetch, and the summary can never
+    disagree with the detail below it.
+    """
+    s = requests.Session()
+    s.headers.update(UA)
+    res = outcomes_for([f["slug"] for f in fills], s)
+    rows = []
+    for f in fills:
+        up_won = res.get(f["slug"])
+        coin = f.get("coin", "btc")
+        if up_won is None:
+            rows.append({"coin": coin, "slug": f["slug"], "side": f["side"],
+                         "px": float(f["px"]), "shares": float(f["shares"]),
+                         "seen_px": None, "slip": None, "fee": 0.0,
+                         "won": False, "pnl": 0.0, "reason": "",
+                         "status": "unresolved"})
+            continue
+        won = up_won if f["side"] == "Up" else (not up_won)
+        px = float(f["px"])
+        sh = float(f["shares"])
+        fee = float(f.get("fee_per_sh", FEE * px * (1 - px)))
+        seen = (f.get("meta") or {}).get("seen_px")
+        rows.append({"coin": coin,
+                     "slug": f["slug"], "side": f["side"], "px": px,
+                     "seen_px": seen,
+                     "slip": (px - seen) if seen is not None else None,
+                     "shares": sh, "fee": fee, "won": bool(won),
+                     "pnl": sh * (float(won) - px - fee),
+                     "reason": (f.get("meta") or {}).get("reason", "")[:60],
+                     "status": "scored"})
+    return rows
+
+
 def _report(fills, a):
     if not fills:
         print("no latency-realistic fills yet on a verified-fresh oracle "
@@ -150,30 +198,7 @@ def _report(fills, a):
     print(f"({' + '.join(tags)}; --all-oracle / --all-latency to widen)")
     print(f"(filtered to reason_prefix={a.reason_prefix!r}"
           + (f", since {a.since}" if a.since else "") + ")")
-    s = requests.Session()
-    s.headers.update(UA)
-    res = outcomes_for([f["slug"] for f in fills], s)
-
-    rows = []
-    for f in fills:
-        up_won = res.get(f["slug"])
-        if up_won is None:
-            rows.append({**f, "status": "unresolved"})
-            continue
-        won = up_won if f["side"] == "Up" else (not up_won)
-        px = float(f["px"])
-        sh = float(f["shares"])
-        fee = float(f.get("fee_per_sh", FEE * px * (1 - px)))
-        seen = (f.get("meta") or {}).get("seen_px")
-        rows.append({"coin": f.get("coin", "btc"),
-                     "slug": f["slug"], "side": f["side"], "px": px,
-                     "seen_px": seen,
-                     "slip": (px - seen) if seen is not None else None,
-                     "shares": sh, "fee": fee, "won": bool(won),
-                     "pnl": sh * (float(won) - px - fee),
-                     "reason": (f.get("meta") or {}).get("reason", "")[:60],
-                     "status": "scored"})
-    d = pd.DataFrame(rows)
+    d = pd.DataFrame(score_rows(fills))
     sc = d[d.status == "scored"]
     un = d[d.status == "unresolved"]
     print(f"fills={len(d)}  scored={len(sc)}  unresolved={len(un)} "

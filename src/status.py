@@ -16,6 +16,63 @@ import time
 
 import glob
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def pnl_by_bot():
+    """The number you actually came here for, per bot, at the top.
+
+    Previously this ran score_paper.py as a subprocess. Python buffers its
+    own prints while a child writes straight to the terminal, so the whole
+    fills section appeared ABOVE the health blocks -- it looked like noise
+    and read as if there were no P&L at all.
+    """
+    try:
+        import pandas as pd
+        import score_paper as sp
+    except Exception as e:  # noqa: BLE001
+        print(f"  cannot load the scorer: {e}")
+        return None
+    a = sp.parser().parse_args([])
+    fills = sp.gather(a)
+    if not fills:
+        print("  no latency-realistic fills on a fresh oracle yet")
+        return None
+    rows = sp.score_rows(fills)
+    d = pd.DataFrame(rows)
+    sc = d[d.status == "scored"]
+    un = d[d.status == "unresolved"]
+    if not len(sc):
+        print(f"  {len(un)} fill(s) taken, none settled yet — the venue "
+              f"resolves a market ~1 min after it closes")
+        return d
+    print(f"{'bot':<7}{'fills':>6}{'shares':>9}{'avg px':>8}{'hit':>7}"
+          f"{'c/share':>9}{'P&L $':>9}{'mkts':>6}{'open':>6}")
+    for coin in sorted(sc.coin.unique()):
+        x = sc[sc.coin == coin]
+        w = x.shares.sum()
+        print(f"{coin:<7}{len(x):>6,}{w:>9,.0f}"
+              f"{(x.px * x.shares).sum() / w:>8.4f}"
+              f"{(x.won * x.shares).sum() / w:>7.3f}"
+              f"{x.pnl.sum() / w * 100:>+9.2f}{x.pnl.sum():>+9.2f}"
+              f"{x.slug.nunique():>6}{(un.coin == coin).sum():>6}")
+    w = sc.shares.sum()
+    print(f"{'TOTAL':<7}{len(sc):>6,}{w:>9,.0f}"
+          f"{(sc.px * sc.shares).sum() / w:>8.4f}"
+          f"{(sc.won * sc.shares).sum() / w:>7.3f}"
+          f"{sc.pnl.sum() / w * 100:>+9.2f}{sc.pnl.sum():>+9.2f}"
+          f"{sc.slug.nunique():>6}{len(un):>6}")
+    # Fills inside one market settle on one outcome, so the honest
+    # denominator is markets, not fills.
+    g = sc.groupby("slug").agg(pnl=("pnl", "sum"), sh=("shares", "sum"))
+    if len(g) > 2:
+        mu = g.pnl.sum() / g.sh.sum()
+        se = ((g.pnl - mu * g.sh) ** 2).sum() ** 0.5 / g.sh.sum()
+        if se > 0:
+            print(f"\n  t = {mu / se:+.2f} clustered by market "
+                  f"(n={len(g)} markets, NOT {len(sc)} fills)")
+    return d
+
 
 def health_logs():
     """Every per-coin decisions log, plus the legacy flat one."""
@@ -42,6 +99,9 @@ def last_health(path):
 
 
 def main():
+    print("########## P&L BY BOT ".ljust(60, "#"))
+    pnl_by_bot()
+    print()
     paths = health_logs()
     if not paths:
         print("no decisions log yet — no bot has started")
@@ -60,7 +120,10 @@ def main():
             print("no health line yet — bot may still be starting")
             continue
         show(d)
-    print("\n=== PAPER FILLS (scored against the venue's outcomes) ===")
+    print("\n=== PAPER FILLS, in detail "
+          "(scored against the venue's outcomes) ===")
+    sys.stdout.flush()      # the child writes to the fd directly; without
+                            # this its output lands above everything above
     try:
         subprocess.run([sys.executable, "src/score_paper.py"], check=False)
     except Exception as e:  # noqa: BLE001
@@ -107,6 +170,20 @@ def show(d):
     # never become orders -- once a market hits its dollar cap every later
     # signal is sized to zero -- so comparing misses to `fired` reported a
     # 0% miss rate off two orders and looked like a broken fill model.
+    mw = d.get("miss_why") or {}
+    if any(mw.values()):
+        tot = sum(mw.values()) or 1
+        print("            why: "
+              + "  ".join(
+                  f"{k}={v} ({v/tot:.0%})" for k, v in mw.items() if v))
+        if mw.get("too_small", 0) > 0.5 * tot:
+            print("            (mostly OUR OWN caps, not the venue: the "
+                  "fill model allows a quarter of what printed at our "
+                  "limit in the last 5s, and below 5 shares the venue "
+                  "would reject the order anyway. Thin coins hit this.)")
+        elif mw.get("ask_gone", 0) > 0.5 * tot:
+            print("            (mostly the ask MOVING inside our 276ms "
+                  "delay — the real race, and the thing co-location buys)")
     ms = d.get("misses")
     if sent and ms is not None and sent >= 50 and ms / sent < 0.15:
         print(f"            !! only {ms/sent:.0%} of SENT orders miss. "
