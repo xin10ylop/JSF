@@ -352,3 +352,42 @@ imports at 34 MB. Five bots plus the recorder is ~310 MB, which fits with
 room to spare. `droplet_setup.sh` also grows the swapfile to 2 GB now
 rather than only creating one when absent — the original run made 1 GB and
 the `[ ! -f /swapfile ]` guard skipped it on every run afterwards.
+
+## 8.9 Does the contract change apply to every coin?
+
+The bot was extended to eth/sol/xrp/doge on the assumption that the
+2026-08-07 trailing-TWAP rule — verified on 2,880 BTC markets — governs
+them too. That assumption drives both the z the strategy fires on and the
+outcome the paper broker settles against, and it had never been tested.
+
+`src/verify_rule_multicoin.py` compares both candidate rules against the
+venue's own resolved outcomes. The decisive column is the last one: on
+markets where the two rules DISAGREE, how often is trailing-TWAP the one
+that matches the settled outcome?
+
+| coin | fam | pre-change | post-change |
+|------|-----|-----------|-------------|
+| btc | 5m | 0.036 | **0.787** |
+| eth | 5m | 0.233 | **0.814** |
+| sol | 5m | 0.400 | **0.794** |
+| xrp | 5m | 0.182 | **0.918** |
+| doge | 5m | 0.333 | **0.851** |
+| btc | 15m | 0.000 | **0.786** |
+| eth | 15m | 0.143 | **0.818** |
+| sol | 15m | 0.167 | **0.818** |
+| xrp | 15m | 0.429 | **0.842** |
+| doge | 15m | 1.000 (n=2) | **0.800** |
+
+Unambiguous and universal: before the change the END price governed every
+coin, after it the trailing TWAP does, in both families. Overall match rate
+rises with it (btc 5m 0.8651 -> 0.9111, xrp 5m 0.8981 -> 0.9688).
+
+The residual — 79-92% rather than 100% — is expected. Binance stands in for
+Chainlink here, and disagreement markets are precisely the near-ties where
+proxy error bites hardest. The BTC verification against real Chainlink
+ticks put it at 82.7%.
+
+**Gap that remains:** `data/pmfree_15m/trades` covers btc, eth and sol
+only. For xrp and doge the 15m *rule* is verified but the 15m *edge* is
+not measured — the bot trades that family on mechanism, not evidence.
+Either fetch those tapes or drop 15m for those two coins.

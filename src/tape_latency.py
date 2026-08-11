@@ -145,20 +145,27 @@ def main():
     ap.add_argument("--lags", default="0,1,2,3")
     ap.add_argument("--picks", default="first",
                     help="first|last|uniform, comma separated")
+    # THE control. A positive edge post-change only means what we claim if
+    # the same rule on the same markets BEFORE 2026-08-07 pays nothing:
+    # otherwise we are measuring a generic favourite/longshot bias that
+    # predates the contract change and has nothing to do with it.
+    ap.add_argument("--eras", default="post", help="post,pre")
     a = ap.parse_args()
     for coin in a.coins.split(","):
         for fam in a.fams.split(","):
             print(f"\n### {coin.upper()} {fam}  cap={a.cap:g} sh/market  "
                   f"|z|>={a.zmin}  px<={a.max_price}  rem "
                   f"({a.lo_rem:g},{a.hi_rem:g}]s")
-            for lag in [int(x) for x in a.lags.split(",")]:
-                t = build_lagged(coin, a.root, fam, lag)
-                if t is None or not len(t):
-                    print(f"  lag={lag}s: no data")
-                    continue
-                for pick in a.picks.split(","):
-                    run(t, a.zmin, a.max_price, a.lo_rem, a.hi_rem, a.cap,
-                        f"lag {lag}s / {pick}", pick)
+            for era in a.eras.split(","):
+                for lag in [int(x) for x in a.lags.split(",")]:
+                    t = build_lagged(coin, a.root, fam, lag, era=era)
+                    if t is None or not len(t):
+                        print(f"  {era} lag={lag}s: no data")
+                        continue
+                    for pick in a.picks.split(","):
+                        run(t, a.zmin, a.max_price, a.lo_rem, a.hi_rem,
+                            a.cap, f"{era.upper()} lag {lag}s / {pick}",
+                            pick)
 
 
 if __name__ == "__main__":
