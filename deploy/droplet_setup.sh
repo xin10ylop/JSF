@@ -86,8 +86,8 @@ cat > /etc/systemd/system/jsf.slice <<'UNIT'
 Description=JSF bots and recorder, memory-bounded as a group
 
 [Slice]
-MemoryHigh=1200M
-MemoryMax=1450M
+MemoryHigh=700M
+MemoryMax=900M
 UNIT
 
 cat > /etc/systemd/system/jsf-recorder.service <<'UNIT'

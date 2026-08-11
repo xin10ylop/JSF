@@ -82,7 +82,20 @@ def procs():
         try:
             st = open(f"{d}/stat").read().rsplit(") ", 1)[1].split()
             cpu_s = (int(st[11]) + int(st[12])) / tick
-            rss = int(open(f"{d}/statm").read().split()[1]) * page
+            # PSS, not RSS: shared interpreter and numpy pages exist once
+            # in physical memory but appear in every process's RSS, which
+            # overstated this set by 28% and would have cost a whole
+            # droplet tier.
+            rss = 0
+            try:
+                for line in open(f"{d}/smaps_rollup"):
+                    if line.startswith("Pss:"):
+                        rss = int(line.split()[1]) * 1024
+                        break
+            except OSError:
+                pass
+            if not rss:
+                rss = int(open(f"{d}/statm").read().split()[1]) * page
         except (OSError, IndexError, ValueError):
             continue
         pid = os.path.basename(d)
@@ -123,7 +136,7 @@ def main():
         if not rows:
             print("no bot/run.py or bot/recorder.py processes running here.")
             return
-        print(f"\n{'process':<32}{'CPU %core':>10}{'RSS MB':>9}")
+        print(f"\n{'process':<32}{'CPU %core':>10}{'PSS MB':>9}")
         tc = tm = 0.0
         for k, pct, mem in rows:
             tc += pct
@@ -148,7 +161,7 @@ def main():
     dt = time.time() - t0
     a1 = {k: read_usec(d) for k, d in u.items()}
 
-    print(f"{'unit':<32}{'CPU %core':>10}{'RSS MB':>9}")
+    print(f"{'unit':<32}{'CPU %core':>10}{'PSS MB':>9}")
     tot_cpu = tot_mem = 0.0
     for k, d in u.items():
         if a0[k] is None or a1[k] is None:

@@ -181,3 +181,31 @@ At 400 ms, by the price we aimed at: 0.92-0.95 **63.5% / 49.9%**,
 0.70-0.85 at 56.7% / 44.6%. The paper broker was reaching its price 96% of
 the time and taking 100% of the size — roughly a 2-3x overstatement in the
 band where it actually trades.
+
+## Host sizing, measured 2026-08-11
+
+| | CPU (% of a core) | RSS | **PSS** |
+|---|---|---|---|
+| one bot | 7.4% | 121 MB | **88 MB** |
+| recorder | ~5% | 43 MB | **31 MB** |
+| 5 bots + recorder | ~42% | 646 MB | **466 MB** |
+
+**Size on PSS, not RSS.** Six python processes share one interpreter, one
+numpy and one OpenSSL; those pages exist once in physical memory but appear
+in every process's RSS. Summing RSS gives 646 MB against a true 466 MB — a
+28% overstatement, and enough to buy a droplet tier that is not needed. A
+systemd slice's `memory.current` charges the true figure, so PSS is also
+what the `MemoryMax` ceiling has to be set against.
+
+Against DigitalOcean's tiers (usable RAM after the kernel, minus ~150 MB
+for sshd/systemd/journald, minus ~300 MB while the daily edge check holds
+pandas and parquet):
+
+* **1 GB ($6)** — 345 MB spare steady, 45 MB during the edge check.
+  Enough for JSF alone. Not enough to also host an unrelated bot.
+* **2 GB ($12 basic / $16 premium NVMe)** — 1,347 MB spare steady.
+  Required if the box hosts anything besides JSF.
+
+CPU is not the constraint at either tier: the whole set is ~0.42 of one
+core, and BTC is half of that because it alone carries ~458 CLOB messages
+per second against 47-63 for the quieter coins.
