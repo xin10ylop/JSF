@@ -391,3 +391,27 @@ ticks put it at 82.7%.
 only. For xrp and doge the 15m *rule* is verified but the 15m *edge* is
 not measured — the bot trades that family on mechanism, not evidence.
 Either fetch those tapes or drop 15m for those two coins.
+
+## 8.10 Full coverage: every coin, every family, measured
+
+The 15m gap for xrp and doge is closed (tapes fetched from the free
+endpoint). Post-change, lag 1s, cap 200 sh/market, uniform participation:
+
+| coin | 5m $/day | 5m t | 15m $/day | 15m t |
+|------|---------:|-----:|----------:|------:|
+| btc  | +531 | +3.41 | +128 | +2.51 |
+| eth  | +667 | +5.98 | +100 | +2.40 |
+| sol  | +177 | +2.40 |  +52 | +9.75 |
+| xrp  | +450 | +4.72 |  +67 | +3.88 |
+| doge | +411 | +4.03 |  +15 | +4.39 |
+| **total** | **+2,236** | | **+362** | |
+
+**~$2,600/day** at 200 shares/market. The live config's
+`max_market_dollars: 150` binds nearer 161 shares at these prices, scaling
+this to roughly **$2,100/day**. Ten of ten coin-family combinations are
+positive with t >= 2.4.
+
+doge 15m is the one to treat sceptically: 710 shares/day over 110 markets
+with a hit rate of 1.000. The t is market-clustered so it is not the naive
+fill-count illusion, but $15/day on a perfect record is a small sample, not
+a discovery. It costs nothing to keep and nothing to lose.
