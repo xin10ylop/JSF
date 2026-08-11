@@ -67,6 +67,13 @@ def main():
     ap.add_argument("--all-oracle", action="store_true",
                     help="include fills taken on a stale/unstamped oracle "
                          "(default: only fills stamped fresh)")
+    # Fills before the latency model executed instantly at the price the bot
+    # SAW. That is the single biggest way paper flattered reality (63% of an
+    # overnight +$1,331 came from sub-0.85 dips that vanish in <150ms), and
+    # 488 such fills would otherwise dominate the average for hours.
+    ap.add_argument("--all-latency", action="store_true",
+                    help="include zero-latency fills from before the latency "
+                         "model (default: only latency-realistic fills)")
     a = ap.parse_args()
     since_us = None
     if a.since:
@@ -90,6 +97,9 @@ def main():
                 continue
         if since_us and d.get("t_us", 0) < since_us:
             continue
+        if not a.all_latency:
+            if (d.get("meta") or {}).get("seen_px") is None:
+                continue
         if not a.all_oracle:
             oa = (d.get("meta") or {}).get("oracle_age_s")
             # Unstamped fills predate the freshness stamp and were taken
@@ -98,14 +108,17 @@ def main():
                 continue
         fills.append(d)
     if not fills:
-        print("no fills yet on a verified-fresh oracle "
-              "(use --all-oracle to see the contaminated history)"
+        print("no latency-realistic fills yet on a verified-fresh oracle "
+              "(use --all-latency / --all-oracle to see the earlier history)"
               if not a.all_oracle else
               f"no fills matching reason_prefix={a.reason_prefix!r}"
               + (f" since {a.since}" if a.since else ""))
         return
-    print(f"(fresh-oracle fills only; --all-oracle to include the rest)"
-          if not a.all_oracle else "(ALL fills, including stale-oracle)")
+    tags = []
+    tags.append("fresh-oracle" if not a.all_oracle else "ALL oracle states")
+    tags.append("latency-realistic" if not a.all_latency
+                else "ALL fills incl. zero-latency")
+    print(f"({' + '.join(tags)}; --all-oracle / --all-latency to widen)")
     print(f"(filtered to reason_prefix={a.reason_prefix!r}"
           + (f", since {a.since}" if a.since else "") + ")")
     s = requests.Session()
@@ -122,7 +135,10 @@ def main():
         px = float(f["px"])
         sh = float(f["shares"])
         fee = float(f.get("fee_per_sh", FEE * px * (1 - px)))
+        seen = (f.get("meta") or {}).get("seen_px")
         rows.append({"slug": f["slug"], "side": f["side"], "px": px,
+                     "seen_px": seen,
+                     "slip": (px - seen) if seen is not None else None,
                      "shares": sh, "fee": fee, "won": bool(won),
                      "pnl": sh * (float(won) - px - fee),
                      "reason": (f.get("meta") or {}).get("reason", "")[:60],
@@ -149,6 +165,13 @@ def main():
         "hit": (x.won * x.shares).sum() / x.shares.sum(),
         "c_per_sh": x.pnl.sum() / x.shares.sum() * 100,
         "pnl": x.pnl.sum()})).to_string(float_format=lambda v: f"{v:,.2f}"))
+    sl = sc[sc.slip.notna()]
+    if len(sl):
+        w = sl.shares
+        print(f"\nslippage (paid - seen): mean {(sl.slip*w).sum()/w.sum()*100:+.2f}c/share"
+              f"   worse {100*(sl.slip > 1e-9).mean():.0f}% / same "
+              f"{100*(sl.slip.abs() <= 1e-9).mean():.0f}% / better "
+              f"{100*(sl.slip < -1e-9).mean():.0f}% of fills")
     per_mkt = sc.groupby("slug").shares.sum()
     print(f"\nmarkets traded {len(per_mkt)}   shares/market: "
           f"mean {per_mkt.mean():.0f} median {per_mkt.median():.0f} "
