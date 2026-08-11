@@ -52,7 +52,10 @@ class Bot:
         if cfg.get("extreme_taker", {}).get("enabled", False):
             self.strategies.append(ExtremeTaker(cfg.get("extreme_taker", {})))
         self.decisions = open("logs/decisions.jsonl", "a")
-        self.pending = {}      # slug -> MarketState awaiting settlement
+        self.pending_settle = {}   # slug -> MarketState awaiting settlement
+        self.pending = []          # latency-delayed taker orders
+        self.latency_us = int(cfg.get('latency_ms', 150) * 1000)
+        self.n_miss = 0            # orders that arrived too late
         self.n_clob = 0        # counters surfaced in the health log so a
         self.n_clob_err = 0    # silently-stalled feed is visible at a glance
         self.n_eval_err = 0
@@ -129,7 +132,7 @@ class Bot:
                 # orphans the fill in the broker forever and silently biases
                 # the paper record (observed live: a 100-share fill at 0.37
                 # that never settled). Park it for the settle loop instead.
-                self.pending[slug] = m
+                self.pending_settle[slug] = m
                 self.log_decision({"kind": "settle_deferred", "slug": slug})
 
     def _settle_result(self, m):
@@ -149,14 +152,28 @@ class Bot:
 
     # ---- feeds ---------------------------------------------------------
     async def binance_feed(self):
+        """Spot feed. Same recv-timeout requirement as the oracle feed.
+
+        Without it a quiet or half-dead socket starves the vol estimator and
+        `spot_adj`. Observed live: vol sd collapsed to 2.67e-07 (40x too
+        low) and 63% of evaluations were rejected for stale inputs, i.e. the
+        bot was throwing away most of its opportunities.
+        """
         url = "wss://data-stream.binance.vision/ws/btcusdt@trade"
+        RECV_TIMEOUT_S = 10
         while True:
             try:
                 async with websockets.connect(url, ping_interval=20) as ws:
-                    async for msg in ws:
+                    while True:
+                        msg = await asyncio.wait_for(
+                            ws.recv(), timeout=RECV_TIMEOUT_S)
                         d = json.loads(msg)
-                        self.state.on_binance(float(d["p"]), int(d["T"]) //
-                                              (1000 if d["T"] > 1e14 else 1))
+                        self.state.on_binance(
+                            float(d["p"]),
+                            int(d["T"]) // (1000 if d["T"] > 1e14 else 1))
+            except asyncio.TimeoutError:
+                self.log_decision({"kind": "binance_silent",
+                                   "note": f"no trade in {RECV_TIMEOUT_S}s"})
             except Exception as e:  # noqa: BLE001
                 self.log_decision({"kind": "feed_err", "feed": "binance",
                                    "err": str(e)[:100]})
@@ -362,7 +379,7 @@ class Bot:
         async with aiohttp.ClientSession() as session:
             while True:
                 await asyncio.sleep(30)
-                for slug, m in list(self.pending.items()):
+                for slug, m in list(self.pending_settle.items()):
                     result = self._settle_result(m)
                     src = "oracle"
                     if result is None and now_us() > m.t1_us + 120_000_000:
@@ -374,12 +391,12 @@ class Bot:
                         self.log_decision({"kind": "settled", "slug": slug,
                                            "result": result, "pnl": pnl,
                                            "src": src})
-                        self.pending.pop(slug, None)
+                        self.pending_settle.pop(slug, None)
                     elif now_us() > m.t1_us + give_up_s * 1_000_000:
                         self.log_decision({"kind": "settle_FAILED",
                                            "slug": slug,
                                            "note": "position left unscored"})
-                        self.pending.pop(slug, None)
+                        self.pending_settle.pop(slug, None)
 
     async def _gamma_result(self, session, slug):
         """0 if Up won, 1 if Down won, from the venue's settled outcome."""
@@ -441,7 +458,8 @@ class Bot:
             self.log_decision({
                 "kind": "health", "markets": len(s.markets),
                 "uptime_s": round((now_us() - self.started_us) / 1e6, 1),
-                "pending_settle": len(self.pending),
+                "pending_settle": len(self.pending_settle),
+                "pending_orders": len(self.pending), "misses": self.n_miss,
                 "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
                 "evals": self.n_eval, "eval_errs": self.n_eval_err,
                 "signals": self.n_signal, "killed": self.risk.killed,
@@ -455,11 +473,40 @@ class Bot:
                 "stale": {k: round(v, 1) for k, v in s.staleness().items()},
                 "detail": mk})
 
+    def _process_pending(self):
+        """Execute delayed orders against the book as it is NOW."""
+        if not self.pending:
+            return
+        now = now_us()
+        keep = []
+        for o in self.pending:
+            if now < o["fire_us"]:
+                keep.append(o)
+                continue
+            m = self.state.markets.get(o["slug"])
+            if m is None:
+                self.n_miss += 1
+                continue
+            if o["side"] == "Up":
+                px, sz = m.best_ask()
+            else:
+                px, sz, _src = m.best_ask_dn()
+            if px is None or px > o["limit"] + 1e-9 or sz <= 0:
+                self.n_miss += 1          # the ask we aimed at is gone
+                self.log_decision({"kind": "taker_miss", "slug": o["slug"],
+                                   "side": o["side"], "limit": o["limit"],
+                                   "now_ask": px})
+                continue
+            self.broker.taker_buy(o["slug"], o["side"], px, sz, o["size"],
+                                  meta=o["meta"])
+        self.pending = keep
+
     def _maybe_eval(self, m):
         """Evaluate immediately if this market is inside its settle window."""
         if m is None:
             return
         rem = (m.t1_us - now_us()) / 1e6
+        self._process_pending()
         if 0 < rem <= m.w:
             self._try_market(m)
 
@@ -525,18 +572,28 @@ class Bot:
                     now_us() + int(sig.get("ttl_s", 20) * 1e6),
                     meta={"reason": sig["reason"]})
             elif sig["action"] == "taker_buy":
-                self.broker.taker_buy(
-                    m.slug, sig["side"], sig["px"], sig.get("avail", 0),
-                    size,
-                    meta={"reason": sig["reason"],
-                          "oracle_age_s": sig.get("oracle_age_s"),
-                          "z": sig.get("z"), "ev_est": sig.get("ev_est")})
+                # Do NOT fill at the price we just saw. A marketable order
+                # reaches the venue `latency_ms` later and executes against
+                # whatever is resting THEN, up to our limit. 63% of paper
+                # P&L came from sub-0.85 dips, which are exactly the prices
+                # that disappear fastest -- filling them instantly is the
+                # single biggest way paper flatters reality.
+                self.pending.append({
+                    "slug": m.slug, "side": sig["side"],
+                    "limit": sig["px"], "size": size,
+                    "fire_us": now_us() + self.latency_us,
+                    "meta": {"reason": sig["reason"],
+                             "oracle_age_s": sig.get("oracle_age_s"),
+                             "z": sig.get("z"),
+                             "ev_est": sig.get("ev_est"),
+                             "seen_px": sig["px"]}})
 
     async def decide_loop(self):
         """1s safety net. The primary path is event-driven off book updates
         (see _on_clob); this catches markets whose book has gone quiet."""
         while True:
             await asyncio.sleep(1.0)
+            self._process_pending()
             for m in list(self.state.markets.values()):
                 self._try_market(m)
 

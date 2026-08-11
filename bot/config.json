@@ -54,5 +54,7 @@
     "_max_price_note": "Raised 0.97 -> 0.99. The 0.985-0.990 band alone holds 1.22M of the 2.6M qualifying shares and still pays +0.57c/share (hit 0.996) because the fee collapses to 0.07c up there; pre-change control in the same band is -0.64c. Capping at 0.97 refused 97.7% of strong signals (px_pass 2.3% live) and left 2.5x the shares on the table. Blended EV falls 7.37c -> 3.30c but the pool grows to $29.3K/day and markets/day 367 -> 862. NOTE the payoff shape up there is ~79:1 against: a loss costs ~98.75c/share, so the dollar cap matters more than the share cap."
   },
   "_note": "Settlement changed 2026-08-07 to a TRAILING TWAP at BOTH boundaries: Up iff mean(P,[t1-30,t1)) >= mean(P,[t0-30,t0)). Verified on 2,880 settled markets (0.9503 vs 0.8904 for the old rule; 82.7% correct on the 266 disagreeing markets). rollavg_edge trades the venue's failure to re-price this: +3.04c/share at |z|>=2 vs +0.19c on a pre-change control. vacuum_ladder stays off: it harvested last-second spikes, which an average neutralises.",
-  "coin": "btc"
+  "coin": "btc",
+  "latency_ms": 150,
+  "_latency_note": "Marketable orders are held latency_ms then executed against the book as it is THEN, up to the signal price as a limit. Zero-latency fills were producing 63% of paper P&L from sub-0.85 dips that vanish fastest."
 }
