@@ -43,20 +43,29 @@ mkdir -p logs data/live data/live/books reports
 # The recorder and the bot each carry ~150-250 MB RSS once numpy/scipy are
 # imported, and the daily edge check loads parquet on top of that. Without
 # swap the box OOMs and drops SSH.
-# GROW it too, not just create it: the original run made a 1G file and the
-# `[ ! -f ]` guard then skipped it forever. Observed on a 961 MB droplet
-# already 511 MB into swap with six python processes to host.
-SWAP_MB=$(free -m | awk '/^Swap:/{print $2}')
-if [ ! -f /swapfile ] || [ "${SWAP_MB:-0}" -lt 2000 ]; then
-  swapoff /swapfile 2>/dev/null || true
-  rm -f /swapfile
+# Grow total swap to >= 2G by ADDING a file, never by replacing one.
+# `swapoff` on a box whose swap is in use forces every swapped-out page
+# back into RAM at once, and this droplet hosts processes that are not
+# ours (/opt/polymarketstrat) -- taking swap away could OOM-kill them.
+# Adding a second file is additive and safe at any moment.
+if [ ! -f /swapfile ]; then
   fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
   chmod 600 /swapfile
   mkswap /swapfile
   swapon /swapfile
   grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-  echo 'vm.swappiness=20' > /etc/sysctl.d/99-jsf.conf && sysctl -p /etc/sysctl.d/99-jsf.conf
 fi
+SWAP_MB=$(free -m | awk '/^Swap:/{print $2}')
+if [ "${SWAP_MB:-0}" -lt 2000 ] && [ ! -f /swapfile2 ]; then
+  echo "swap is ${SWAP_MB}MB; adding /swapfile2 rather than replacing /swapfile"
+  fallocate -l 2G /swapfile2 || dd if=/dev/zero of=/swapfile2 bs=1M count=2048
+  chmod 600 /swapfile2
+  mkswap /swapfile2
+  swapon /swapfile2
+  grep -q '^/swapfile2' /etc/fstab || echo '/swapfile2 none swap sw 0 0' >> /etc/fstab
+fi
+echo 'vm.swappiness=20' > /etc/sysctl.d/99-jsf.conf
+sysctl -p /etc/sysctl.d/99-jsf.conf >/dev/null
 free -h
 
 cat > /etc/systemd/system/jsf-recorder.service <<'UNIT'
