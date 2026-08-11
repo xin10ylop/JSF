@@ -22,8 +22,17 @@ apt-get install -y python3 python3-pip git
 if [ ! -d $DIR ]; then
   git clone --branch "$BRANCH" "$REPO_URL" $DIR
 else
-  cd $DIR && git fetch origin "$BRANCH" && git checkout "$BRANCH" && git pull
+  # Hard-reset to origin. A tracked file edited on the host (probe_latency
+  # used to write rtt_ms straight into bot/config.json) makes `git pull`
+  # abort, and the rest of this script then happily "succeeds" against the
+  # OLD code -- which is how the multi-coin build appeared to deploy and
+  # did not. Host-specific settings live in bot/config.local.json, which
+  # is gitignored and survives this.
+  cd $DIR && git fetch origin "$BRANCH" \
+    && git checkout -B "$BRANCH" "origin/$BRANCH" \
+    && git reset --hard "origin/$BRANCH"
 fi
+echo "deployed commit: $(cd $DIR && git rev-parse --short HEAD)"
 cd $DIR
 pip3 install -r requirements.txt --break-system-packages 2>/dev/null \
   || pip3 install -r requirements.txt

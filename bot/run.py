@@ -32,9 +32,24 @@ GAMMA = "https://gamma-api.polymarket.com/markets"
 CFG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
 
+LOCAL_CFG_PATH = os.path.join(os.path.dirname(__file__), "config.local.json")
+
+
 def load_cfg():
+    """config.json, then bot/config.local.json shallow-merged over it.
+
+    Host-specific values (rtt_ms above all) belong to the machine, not the
+    repo. Writing them into the tracked config made `git pull` abort with
+    "your local changes would be overwritten" -- which is exactly how the
+    multi-coin build silently failed to deploy. The local file is
+    gitignored, so measuring latency and pulling code never collide again.
+    """
     with open(CFG_PATH) as f:
-        return json.load(f)
+        cfg = json.load(f)
+    if os.path.exists(LOCAL_CFG_PATH):
+        with open(LOCAL_CFG_PATH) as f:
+            cfg.update(json.load(f))
+    return cfg
 
 
 class Bot:
@@ -74,6 +89,7 @@ class Bot:
                          "vol_window_s": 5.0, "reject_rate": 0.01,
                          "min_order_size": 5.0, "use_tape_cap": True,
                          **cfg.get("fill", {})}
+        self.n_sent = 0            # taker orders actually queued
         self.n_miss = 0            # orders that arrived too late
         self.n_reject = 0          # venue rejected on re-validation
         self.n_partial = 0         # filled less than we asked for
@@ -484,6 +500,7 @@ class Bot:
                 "uptime_s": round((now_us() - self.started_us) / 1e6, 1),
                 "pending_settle": len(self.pending_settle),
                 "pending_orders": len(self.pending), "misses": self.n_miss,
+                "orders_sent": self.n_sent,
                 "venue_rejects": self.n_reject, "partials": self.n_partial,
                 "latency_ms": self.latency_us // 1000,
                 "rejects": dict(self.n_rej),
@@ -620,12 +637,15 @@ class Bot:
         st = self.state.staleness()
         book_age = (now_us() - m.book_us) / 1e6 if m.book_us else 1e9
         if not self.risk.inputs_ok(st, book_age):
-            # Attribute the rejection. A market that is not currently in its
-            # window legitimately has a stale book; a stale FEED is a fault.
+            # Attribute the rejection to something inputs_ok ACTUALLY tests.
+            # This used to check Binance staleness first, which stopped
+            # being a rejection reason when the oracle became the fallback
+            # -- so every oracle/book rejection was reported as "binance"
+            # for as long as the throttled public mirror stayed stale, i.e.
+            # nearly always. A diagnostic that names the wrong cause is
+            # worse than no diagnostic.
             if self.risk.killed:
                 self.n_rej["killed"] += 1
-            elif st["binance_s"] >= self.risk.stale_binance_s:
-                self.n_rej["binance"] += 1
             elif st["oracle_s"] >= self.risk.stale_oracle_s:
                 self.n_rej["oracle"] += 1
             else:
@@ -689,6 +709,7 @@ class Bot:
                 # P&L came from sub-0.85 dips, which are exactly the prices
                 # that disappear fastest -- filling them instantly is the
                 # single biggest way paper flatters reality.
+                self.n_sent += 1
                 self.pending.append({
                     "slug": m.slug, "side": sig["side"],
                     "limit": sig["px"], "size": size,

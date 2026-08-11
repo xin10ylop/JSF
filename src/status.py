@@ -99,15 +99,20 @@ def show(d):
     lat = d.get("latency_ms")
     print(f"  orders    pending={d.get('pending_orders')} "
           f"MISSES={d.get('misses')}   <- asks gone by the time we arrive")
-    print(f"            partials={d.get('partials')} "
+    sent = d.get("orders_sent")
+    print(f"            sent={sent} partials={d.get('partials')} "
           f"venue_rejects={d.get('venue_rejects')}"
           + (f"   delay={lat}ms (venue hold + our RTT)" if lat else ""))
-    ms, mi = d.get("misses"), (d.get("funnel") or {}).get("fired", 0)
-    if lat and mi and ms is not None and mi > 50 and ms / mi < 0.15:
-        print(f"            !! only {ms/mi:.0%} of orders miss. Recorded "
-              f"books say ~35% of asks in the 0.92-0.99 band are gone "
-              f"within 400ms — a low miss rate means the fill model is "
-              f"still too kind, not that we are fast.")
+    # The denominator must be orders actually SENT. Most strategy fires
+    # never become orders -- once a market hits its dollar cap every later
+    # signal is sized to zero -- so comparing misses to `fired` reported a
+    # 0% miss rate off two orders and looked like a broken fill model.
+    ms = d.get("misses")
+    if sent and ms is not None and sent >= 50 and ms / sent < 0.15:
+        print(f"            !! only {ms/sent:.0%} of SENT orders miss. "
+              f"Recorded books say ~35% of asks in the 0.92-0.99 band are "
+              f"gone within 400ms — a low miss rate means the fill model "
+              f"is still too kind, not that we are fast.")
     if ev and rej > 0:
         rj = d.get("rejects") or {}
         det = " ".join(f"{k}={v:,}" for k, v in rj.items() if v)

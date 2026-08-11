@@ -98,18 +98,24 @@ def main():
     print(f"Total taker delay to model: {round(rtt)} + {a.hold_ms:.0f} "
           f"(venue hold) = {round(rtt + a.hold_ms)} ms")
     if a.write:
+        # bot/config.local.json, NOT the tracked config: rtt_ms is a
+        # property of this machine, and writing it into a tracked file made
+        # `git pull` abort on local changes -- which is how a deploy
+        # silently did nothing while looking like it had worked.
         import os
         p = os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "bot", "config.json")
-        with open(p) as fh:
-            cfg = json.load(fh)
+            os.path.abspath(__file__))), "bot", "config.local.json")
+        cfg = {}
+        if os.path.exists(p):
+            with open(p) as fh:
+                cfg = json.load(fh)
         old = cfg.get("rtt_ms")
         cfg["rtt_ms"] = round(rtt)
         with open(p, "w") as fh:
             json.dump(cfg, fh, indent=2)
             fh.write("\n")
         print(f"wrote rtt_ms {old} -> {round(rtt)} into {p} "
-              f"(restart the bot to pick it up)")
+              f"(gitignored; restart the bot to pick it up)")
     print("\nThe matching engine is in AWS eu-west-2 (London). If p50 is "
           "well above ~20 ms you are paying for distance: a London or "
           "Dublin host cuts it to single digits, and the measured edge "
