@@ -415,3 +415,37 @@ doge 15m is the one to treat sceptically: 710 shares/day over 110 markets
 with a hit rate of 1.000. The t is market-clustered so it is not the naive
 fill-count illusion, but $15/day on a perfect record is a small sample, not
 a discovery. It costs nothing to keep and nothing to lose.
+
+## 8.11 The control: is this the contract change, or a bias that was always there?
+
+A positive post-change edge only means what we claim if running the SAME
+rule on the SAME markets BEFORE 2026-08-07 pays nothing. Otherwise we are
+harvesting a generic favourite/longshot bias that predates the contract
+change, has a different cause, and may already be arbitraged.
+
+BTC passed this long ago (+3.04c/share post vs +0.19c pre). The four coins
+added with the multi-coin build had never been tested. 5m, lag 1s, cap 200
+sh/market, uniform participation:
+
+| coin | pre-change c/sh | pre t | post-change c/sh | post t |
+|------|----------------:|------:|-----------------:|-------:|
+| eth  | **-2.10** | -0.78 | +1.58 | **+5.98** |
+| sol  | +1.31 | +0.67 | +0.65 | **+2.40** |
+| xrp  | **-0.51** | -0.32 | +1.38 | **+4.72** |
+| doge | **-0.85** | -0.25 | +2.51 | **+4.03** |
+
+Every pre-change edge is statistically indistinguishable from zero
+(|t| <= 0.78) and three of the four are negative, while every post-change
+edge is significant. The effect is the contract change, not a standing
+bias. (BTC 5m pre-change returned no rows here because the local 1s klines
+do not reach back to the pmfree_x4 March/April window; its control was run
+separately and reported earlier.)
+
+**SOL is the exception worth naming.** Its pre-change point estimate
+(+1.31c) is LARGER than its post-change one (+0.65c) — only noisier. On
+this evidence some of SOL's post-change edge could be a pre-existing effect
+rather than the repricing failure. It is also the weakest coin on the
+post-change side (t=+2.40, +$177/day of the ~$2,600 total). Kept for now,
+but it is the first thing to cut if live paper disagrees, and its 15m
+t=+9.75 on 86 markets should be treated as small-sample rather than as
+reassurance.
