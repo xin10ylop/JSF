@@ -262,6 +262,46 @@ def main():
     assert md.best_ask_dn()[:2] == (0.05, 300.0), "down book not tracked"
     print("PASS: order book tracks price_change deltas, both tokens")
 
+    # ---- latency-delayed fills ------------------------------------------
+    # Zero-latency fills were the single biggest way paper flattered
+    # reality: 63% of an overnight +$1,331 came from sub-0.85 dips, which
+    # are exactly the prices that vanish fastest. Orders must wait, then
+    # execute against the book AS IT IS THEN, capped at the signal price.
+    from bot.run import Bot                                   # noqa: E402
+    from bot.risk import Risk                                 # noqa: E402
+    bt = Bot.__new__(Bot)
+    bt.broker = PaperBroker(log_path="logs/reconcile_fills.jsonl")
+    bt.risk = Risk({})
+    bt.decisions = open("logs/reconcile_dec.jsonl", "a")
+    bt.pending, bt.pending_settle, bt.n_miss = [], {}, 0
+    bt.latency_us = 150_000
+    bt.state = BotState()
+    bt.state.oracle_hist.clear()
+    t1l = int(time.time()) + 300
+    ml = MarketState("lat-5m", "up", (t1l - 300) * 1_000_000,
+                     t1l * 1_000_000, asset_id_dn="dn")
+    bt.state.markets[ml.slug] = ml
+    ml.set_book(True, [(0.80, 100.0)], [(0.84, 200.0)])
+    from bot.state import now_us as _n
+
+    def _q(limit, size, due_us):
+        bt.pending.append({"slug": ml.slug, "side": "Up", "limit": limit,
+                           "size": size, "fire_us": due_us,
+                           "meta": {"reason": "rollavg recon"}})
+    _q(0.84, 100, _n() - 1); bt._process_pending()
+    assert bt.broker.positions[(ml.slug, "Up")]["shares"] == 100, \
+        "did not fill when the ask was still there"
+    ml.apply_delta(True, 0.84, 0.0, "SELL")
+    ml.apply_delta(True, 0.95, 300.0, "SELL")
+    _q(0.84, 100, _n() - 1); bt._process_pending()
+    assert bt.n_miss == 1, "pulled ask must count as a miss"
+    assert bt.broker.positions[(ml.slug, "Up")]["shares"] == 100, \
+        "filled above the limit price"
+    _q(0.99, 10, _n() + 5_000_000); bt._process_pending()
+    assert len(bt.pending) == 1, "filled before the latency elapsed"
+    print("PASS: taker fills wait for latency, miss when the ask is pulled, "
+          "and never exceed the limit")
+
     print("\nALL RECONCILIATION CHECKS PASSED")
 
 
