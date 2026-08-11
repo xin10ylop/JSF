@@ -331,6 +331,7 @@ class BotState:
         # oracle ring buffer: (round_ts_us, px). The strike window of a 5m
         # market has already elapsed when the market is discovered, so both
         # contract averages are read from here, not accumulated per market.
+        self._last_good_sigma = None   # newest trusted oracle-derived vol
         self.oracle_hist = deque(maxlen=4000)   # ~1/s -> >1h of history
         self.backfill_oracle()
         self.seed_vol()
@@ -463,11 +464,35 @@ class BotState:
         return sd if VOL_SD_MIN <= sd <= VOL_SD_MAX else None
 
     def sigma_rel(self):
-        """Relative 1s vol to price z with: oracle first, Binance fallback."""
+        """Relative 1s vol to price z: oracle first, Binance fallback.
+
+        The fallback is GUARDED against the reference. Measured on the
+        Amsterdam host after 20,000s of uptime, the Binance-fed estimator
+        had drifted to 2.5e-06 for btc against an oracle reading of
+        1.37e-05 -- 5x low, because the throttled public ws mirror feeds
+        long runs of identical prices and those enter the window as
+        zero returns. It sat inside the plausibility band the whole time,
+        so vol.ok() would have waved it through.
+
+        Harmless while the oracle path works, because this method never
+        reaches the fallback. But the moment the oracle feed hiccups, an
+        unguarded fallback would hand z a denominator 5x too small and
+        manufacture signals -- the exact failure that already cost this
+        project once. So remember the last trustworthy oracle reading and
+        refuse a fallback that disagrees with it by more than 3x. Refusing
+        to price is always safer than pricing off a broken input.
+        """
         s = self.oracle_sigma_rel()
         if s is not None:
+            self._last_good_sigma = s
             return s
-        return math.sqrt(self.vol.var) if self.vol.ok() else None
+        if not self.vol.ok():
+            return None
+        b = math.sqrt(self.vol.var)
+        ref = getattr(self, "_last_good_sigma", None)
+        if ref is not None and not (ref / 3.0 <= b <= ref * 3.0):
+            return None
+        return b
 
     def _integral(self, a_us, b_us):
         """Time-weighted integral of the oracle price over [a_us, b_us).
