@@ -165,7 +165,7 @@ def score_rows(fills):
                          "px": float(f["px"]), "shares": float(f["shares"]),
                          "seen_px": None, "slip": None, "fee": 0.0,
                          "won": False, "pnl": 0.0, "reason": "",
-                         "status": "unresolved"})
+                         "t_us": f.get("t_us", 0), "status": "unresolved"})
             continue
         won = up_won if f["side"] == "Up" else (not up_won)
         px = float(f["px"])
@@ -179,6 +179,7 @@ def score_rows(fills):
                      "shares": sh, "fee": fee, "won": bool(won),
                      "pnl": sh * (float(won) - px - fee),
                      "reason": (f.get("meta") or {}).get("reason", "")[:60],
+                     "t_us": f.get("t_us", 0),
                      "status": "scored"})
     return rows
 

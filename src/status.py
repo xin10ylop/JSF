@@ -64,6 +64,16 @@ def pnl_by_bot():
           f"{sc.slug.nunique():>6}{len(un):>6}")
     # Fills inside one market settle on one outcome, so the honest
     # denominator is markets, not fills.
+    # The number to compare against the projection. "Is it tracking?" is a
+    # different and more useful question than "is it significant yet?", and
+    # only the second one needs a big sample.
+    span_h = 0.0
+    if "t_us" in sc and sc.t_us.max() > 0:
+        span_h = (sc.t_us.max() - sc.t_us.min()) / 1e6 / 3600.0
+    if span_h > 0.25:
+        print(f"\n  run rate: ${sc.pnl.sum() / span_h:+,.0f}/hour = "
+              f"${sc.pnl.sum() / span_h * 24:+,.0f}/day over {span_h:.1f}h "
+              f"of fills   (tape projection: ~$2,100/day at these caps)")
     g = sc.groupby("slug").agg(pnl=("pnl", "sum"), sh=("shares", "sum"))
     tcl = None
     if len(g) > 2:
@@ -74,8 +84,10 @@ def pnl_by_bot():
             print(f"\n  t = {tcl:+.2f} clustered by market "
                   f"(n={len(g)} markets, NOT {len(sc)} fills)")
     if tcl is not None and abs(tcl) < 2.0:
-        print(f"  NOT SIGNIFICANT YET. {len(g)} markets is a handful; the "
-              f"dollar figure above is noise until |t| clears ~2.")
+        print(f"  The fills are real; the SAMPLE is small. {len(g)} markets "
+              f"cannot yet separate this from luck (needs |t| ~2, roughly "
+              f"30+ markets). It is not evidence against the edge -- the "
+              f"run rate above is the thing to watch meanwhile.")
     # A big headline built out of a few cheap longshots is not this
     # strategy. Sub-0.50 fills are the bucket whose PRE-change control was
     # also positive (+2.24c/share), i.e. a different effect that predates
