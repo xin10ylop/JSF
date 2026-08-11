@@ -43,7 +43,13 @@ mkdir -p logs data/live data/live/books reports
 # The recorder and the bot each carry ~150-250 MB RSS once numpy/scipy are
 # imported, and the daily edge check loads parquet on top of that. Without
 # swap the box OOMs and drops SSH.
-if [ ! -f /swapfile ]; then
+# GROW it too, not just create it: the original run made a 1G file and the
+# `[ ! -f ]` guard then skipped it forever. Observed on a 961 MB droplet
+# already 511 MB into swap with six python processes to host.
+SWAP_MB=$(free -m | awk '/^Swap:/{print $2}')
+if [ ! -f /swapfile ] || [ "${SWAP_MB:-0}" -lt 2000 ]; then
+  swapoff /swapfile 2>/dev/null || true
+  rm -f /swapfile
   fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
   chmod 600 /swapfile
   mkswap /swapfile

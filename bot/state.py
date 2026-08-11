@@ -327,13 +327,28 @@ class BotState:
         self.vol = OnlineVol()
         self.basis = deque(maxlen=600)   # (oracle/binance) samples, 1/s
         self.markets = {}                # slug -> MarketState
-        self.pricer = GzPricer()
+        self._pricer = None              # lazy: see the `pricer` property
         # oracle ring buffer: (round_ts_us, px). The strike window of a 5m
         # market has already elapsed when the market is discovered, so both
         # contract averages are read from here, not accumulated per market.
         self.oracle_hist = deque(maxlen=4000)   # ~1/s -> >1h of history
         self.backfill_oracle()
         self.seed_vol()
+
+    @property
+    def pricer(self):
+        """The legacy G(z) pricer, built on first use and never before.
+
+        Unpickling its isotonic models imports sklearn and scipy, which
+        costs 137 MB of RSS -- measured, not estimated. Only fair_legacy()
+        touches it, and that serves GzValueMaker and ExtremeTaker, both
+        disabled. Constructing it eagerly meant five coin processes paying
+        685 MB between them for a code path none of them ran, on a 961 MB
+        droplet that was already 511 MB into swap.
+        """
+        if self._pricer is None:
+            self._pricer = GzPricer()
+        return self._pricer
 
     def seed_vol(self, symbol=None, bars=3600):
         """Warm-start the vol estimator from recent public 1s klines.

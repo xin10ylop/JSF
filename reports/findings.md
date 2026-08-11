@@ -334,3 +334,21 @@ restarted ETH bot backfills its strike window from `data/live/rtds/`, and
 with a btc-only filter it would have sat blind for a full window. Its CLOB
 book capture stays on `record_book_coins` (btc, eth) because raw books ran
 3.8 GB/period for btc alone before pruning.
+
+## 8.8 The multi-coin build almost did not fit
+
+The droplet is 961 MB with a 1 GB swapfile, and it was already 511 MB into
+swap before the five bots allocated anything. A warmed bot process measured
+**182 MB RSS**, so five would have wanted 910 MB against ~400 MB available.
+
+137 MB of that 182 was `GzPricer`, constructed eagerly in
+`BotState.__init__`. Unpickling its isotonic models imports sklearn and
+scipy. It is touched by exactly one method, `fair_legacy()`, which serves
+`GzValueMaker` and `ExtremeTaker` — both disabled in config. Five processes
+were about to pay 685 MB between them for a code path none of them run.
+
+Making it a lazy property takes a warmed bot to **56 MB**; the recorder
+imports at 34 MB. Five bots plus the recorder is ~310 MB, which fits with
+room to spare. `droplet_setup.sh` also grows the swapfile to 2 GB now
+rather than only creating one when absent — the original run made 1 GB and
+the `[ ! -f /swapfile ]` guard skipped it on every run afterwards.
