@@ -39,8 +39,14 @@ class Risk:
             self.killed = True
 
     def inputs_ok(self, staleness, book_age_s):
+        """Binance is an ENHANCEMENT, not a requirement.
+
+        The oracle is the settlement source and `spot_adj` falls back to it,
+        so demanding a fresh Binance tick only threw away opportunities --
+        91% of pre-strategy rejections were Binance staleness caused by a
+        throttled public mirror, not by anything being wrong.
+        """
         return (not self.killed
-                and staleness["binance_s"] < self.stale_binance_s
                 and staleness["oracle_s"] < self.stale_oracle_s
                 and book_age_s < self.stale_book_s)
 

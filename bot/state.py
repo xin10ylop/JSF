@@ -508,12 +508,23 @@ class BotState:
                 return
 
     # ---- derived -------------------------------------------------------
-    def spot_adj(self):
-        """Basis-adjusted Binance spot (best live estimate of next oracle)."""
-        if self.binance_px is None or len(self.basis) < 60:
-            return None
-        ratio = float(np.median(self.basis))
-        return self.binance_px * ratio
+    def spot_adj(self, max_binance_age_s=3.0):
+        """Best live estimate of the next oracle print.
+
+        Binance leads the oracle, so a basis-adjusted Binance price is the
+        better estimator WHEN the feed is good. It often is not: the public
+        mirror is throttled to ~2.6 trades/s with 2 distinct prices per 20s
+        from this host, which starved the vol estimator (sd 2.36e-07) and
+        rejected 91% of evaluations on staleness.
+
+        The oracle is the settlement source itself and ticks ~0.95/s, so it
+        is the correct fallback rather than refusing to price at all.
+        """
+        fresh = (self.binance_px is not None
+                 and (now_us() - self.binance_us) / 1e6 <= max_binance_age_s)
+        if fresh and len(self.basis) >= 60:
+            return self.binance_px * float(np.median(self.basis))
+        return self.oracle_px
 
     def fair(self, m: MarketState, t_us=None):
         """P(Up) for the CURRENT (trailing-TWAP) contract.
