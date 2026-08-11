@@ -56,6 +56,7 @@ class Bot:
         self.pending = []          # latency-delayed taker orders
         self.latency_us = int(cfg.get('latency_ms', 150) * 1000)
         self.n_miss = 0            # orders that arrived too late
+        self.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0}
         self.n_clob = 0        # counters surfaced in the health log so a
         self.n_clob_err = 0    # silently-stalled feed is visible at a glance
         self.n_eval_err = 0
@@ -460,6 +461,7 @@ class Bot:
                 "uptime_s": round((now_us() - self.started_us) / 1e6, 1),
                 "pending_settle": len(self.pending_settle),
                 "pending_orders": len(self.pending), "misses": self.n_miss,
+                "rejects": dict(self.n_rej),
                 "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
                 "evals": self.n_eval, "eval_errs": self.n_eval_err,
                 "signals": self.n_signal, "killed": self.risk.killed,
@@ -530,6 +532,16 @@ class Bot:
         st = self.state.staleness()
         book_age = (now_us() - m.book_us) / 1e6 if m.book_us else 1e9
         if not self.risk.inputs_ok(st, book_age):
+            # Attribute the rejection. A market that is not currently in its
+            # window legitimately has a stale book; a stale FEED is a fault.
+            if self.risk.killed:
+                self.n_rej["killed"] += 1
+            elif st["binance_s"] >= self.risk.stale_binance_s:
+                self.n_rej["binance"] += 1
+            elif st["oracle_s"] >= self.risk.stale_oracle_s:
+                self.n_rej["oracle"] += 1
+            else:
+                self.n_rej["book"] += 1
             return
         for strat in self.strategies:
             sig = strat.evaluate(self.state, m, now_us())
@@ -548,8 +560,19 @@ class Bot:
                 continue
             pos = self.broker.positions.get((m.slug, sig["side"]),
                                             {"shares": 0, "cost": 0})
+            # Orders queued for latency are REAL exposure the moment they
+            # are sent. Sizing against the broker position alone lets every
+            # order queued inside the latency window see an empty book and
+            # get approved -- observed live as 700 shares in a market whose
+            # cap is ~187, from seven identical 39.3-share fills at 0.800.
+            q_sh = sum(o["size"] for o in self.pending
+                       if o["slug"] == m.slug and o["side"] == sig["side"])
+            q_usd = sum(o["size"] * o["limit"] for o in self.pending
+                        if o["slug"] == m.slug and o["side"] == sig["side"])
+            pos = {"shares": pos["shares"] + q_sh,
+                   "cost": pos["cost"] + q_usd}
             nmk = len({k[0] for k, v in self.broker.positions.items()
-                       if v["shares"] > 0})
+                       if v["shares"] > 0} | {o["slug"] for o in self.pending})
             px = sig.get("level", sig.get("px", 0.5))
             size = self.risk.size_ok(pos["shares"], pos["cost"],
                                      sig["size"], px, nmk)

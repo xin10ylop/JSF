@@ -66,9 +66,16 @@ def main():
     rej = ev - f0
     print(f"  activity  evals={ev:,} errs={d.get('eval_errs')} "
           f"signals={d.get('signals')}")
+    print(f"  orders    pending={d.get('pending_orders')} "
+          f"MISSES={d.get('misses')}   <- asks gone by the time we arrive")
     if ev and rej > 0:
-        print(f"            {rej:,} ({rej/ev:.0%}) rejected before the "
-              f"strategy: STALE INPUTS")
+        rj = d.get("rejects") or {}
+        det = " ".join(f"{k}={v:,}" for k, v in rj.items() if v)
+        print(f"            {rej:,} ({rej/ev:.0%}) rejected pre-strategy"
+              + (f"  [{det}]" if det else ""))
+        if rj.get("book", 0) > 0.5 * rej:
+            print("            (mostly BOOK staleness on markets not yet in "
+                  "their window - expected, not a fault)")
 
     f = d.get("funnel") or {}
     if f:

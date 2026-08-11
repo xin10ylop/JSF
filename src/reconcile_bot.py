@@ -40,25 +40,19 @@ def offline_z(path, t0, t1, tau, K, sigma):
 
 def main():
     rng = np.random.default_rng(7)
+    # Construct BotState FIRST: its warm-start pages the public kline API
+    # and can take tens of seconds. Stamping the clock before that lets the
+    # synthetic oracle ticks age past the 20s frozen-oracle guard while the
+    # constructor is still running -- a flaky failure in the harness.
+    st = BotState()
+    st.oracle_hist.clear()
     # Anchor the synthetic window so its LAST oracle tick lands at now.
-    # Boundary-aligning it is wrong in both directions: t0 = current
-    # boundary puts ticks up to 5 min in the future, while t1 = current
-    # boundary ages them by however far we are into the window (0-300s).
-    # Either way the 20s frozen-oracle guard trips depending on when the
-    # test happens to run. The window needs no alignment for the maths.
     t1 = int(time.time())
     t0 = t1 - 300
     base = 65000.0
-    # a driftless 1s path covering [t0-60, t1]
     secs = list(range(t0 - 60, t1 + 1))
     steps = rng.normal(0, 3.0, len(secs)).cumsum()
-    path = {s: base + steps[i] for i, s in enumerate(secs)}
-
-    st = BotState()
-    # BotState warm-starts from the recorder's real oracle log and from live
-    # klines. Both must be cleared here or real ticks land inside the
-    # synthetic market's strike window and the comparison is meaningless.
-    st.oracle_hist.clear()
+    path = {s_: base + steps[i] for i, s_ in enumerate(secs)}
     st.vol.force_var((3.0 / base) ** 2)          # 3 dollars per sqrt(sec)
     st.oracle_sigma_rel = lambda *a, **k: None   # force Binance fallback
     st.binance_px = None
