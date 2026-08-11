@@ -125,19 +125,24 @@ def show(d):
     f = d.get("funnel") or {}
     if f:
         print("\n=== SIGNAL FUNNEL (why evaluations do or don't fire) ===")
-        # cooldown is checked BETWEEN z_pass and px_pass; showing it last
-        # makes px_pass look like a fraction of z_pass when it is not.
+        # Every counter here is a PASS count except `cooldown`, which the
+        # strategy increments on its two rejection paths. Rendering it in
+        # the pass chain printed "cooldown 0 (-1,037 dropped here)" -- which
+        # reads as the re-entry gate killing every signal when in fact it
+        # killed none. Show it separately, labelled for what it is.
         order = ["eval", "in_window", "priced", "book", "z_pass",
-                 "cooldown", "px_pass", "fired"]
+                 "px_pass", "fired"]
         prev = None
         for k in order:
             n = f.get(k, 0)
             drop = ""
-            if prev is not None and prev > 0:
-                drop = f"   (-{prev - n:,} dropped here)" if n < prev else ""
+            if prev is not None and prev > n:
+                drop = f"   (-{prev - n:,} dropped here)"
             print(f"  {k:<10} {n:>8,}{drop}")
-            if k not in ("cooldown",):
-                prev = n
+            prev = n
+        cd = f.get("cooldown", 0)
+        print(f"  {'(re-entry rejects: ' + format(cd, ',') + ')':<10}"
+              f"   <- same book snapshot; not part of the chain above")
         diag = []
         if (d.get("oracle_rate") is not None
                 and d["oracle_rate"] < 0.05 and f.get("z_pass", 0)):
@@ -154,8 +159,13 @@ def show(d):
             diag.append("SIGNAL NEVER STRONG ENOUGH: |z| < zmin live — "
                         "live sigma may exceed the backtest's; recalibrate")
         elif f.get("z_pass", 0) and not f.get("px_pass", 0):
-            diag.append("PRICED OUT: ask above max_price whenever z is "
-                        "strong — the edge is not reachable as a taker")
+            diag.append(
+                "PRICED OUT: the favoured side's ask was above max_price "
+                "on every strong-z evaluation so far. Expected some of the "
+                "time -- when |z| is huge the market is already decided and "
+                "quotes 0.995+. Only a problem if it persists for hours; "
+                "the tape says the 0.98-1.00 band alone carries 1.69M "
+                "qualifying shares over four days.")
         elif f.get("fired", 0):
             diag.append("firing normally")
         for x in diag:
