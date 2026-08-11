@@ -38,10 +38,17 @@ def load_cfg():
 
 
 class Bot:
-    def __init__(self, cfg):
+    def __init__(self, cfg, coin=None):
         self.cfg = cfg
-        self.state = BotState()
-        self.broker = PaperBroker()
+        self.coin = coin or cfg.get("coin", "btc")
+        self.state = BotState(self.coin)
+        # One process per coin, so the record has to be per coin too: a
+        # shared fill log would interleave five bots' fills and make the
+        # per-coin edge unreadable. src/score_paper.py globs logs/*/.
+        self.logdir = os.path.join("logs", self.coin)
+        os.makedirs(self.logdir, exist_ok=True)
+        self.broker = PaperBroker(
+            log_path=os.path.join(self.logdir, "paper_fills.jsonl"))
         self.risk = Risk(cfg.get("risk", {}))
         self.strategies = []
         if cfg.get("rollavg_edge", {}).get("enabled", True):
@@ -52,7 +59,8 @@ class Bot:
             self.strategies.append(GzValueMaker(cfg.get("gz_maker", {})))
         if cfg.get("extreme_taker", {}).get("enabled", False):
             self.strategies.append(ExtremeTaker(cfg.get("extreme_taker", {})))
-        self.decisions = open("logs/decisions.jsonl", "a")
+        self.decisions = open(
+            os.path.join(self.logdir, "decisions.jsonl"), "a")
         self.pending_settle = {}   # slug -> MarketState awaiting settlement
         self.pending = []          # latency-delayed taker orders
         # Total delay before a taker order can match. `venue_hold_ms` is the
@@ -86,12 +94,13 @@ class Bot:
     # ---- market discovery ---------------------------------------------
     async def discover(self, session):
         fams = self.cfg.get("families", {"15m": 900, "5m": 300})
-        # single coin by design: BotState carries one oracle ring buffer,
-        # one vol estimator and one basis series. BTC alone supplies 2.42M
-        # of the 2.98M qualifying shares measured post-change, so the
-        # multi-coin build (per-coin state) is a capacity upgrade, not a
-        # prerequisite. See reports/findings.md.
-        coin = self.cfg.get("coin", "btc")
+        # One coin per process: BotState carries one oracle ring buffer, one
+        # vol estimator and one basis series, and making all of that a dict
+        # would touch every pricing path the reconciliation harness exists
+        # to protect. Run `bot/run.py --coin eth` alongside for each coin.
+        # Measured on the tape, btc-only is ~$580/day and the five-coin set
+        # is $1.6-2.3k/day -- see reports/findings.md section 8.3.
+        coin = self.coin
         now = int(time.time())
         for fam, step in fams.items():
             t0 = now - (now % step)
@@ -173,7 +182,8 @@ class Bot:
         low) and 63% of evaluations were rejected for stale inputs, i.e. the
         bot was throwing away most of its opportunities.
         """
-        url = "wss://data-stream.binance.vision/ws/btcusdt@trade"
+        url = ("wss://data-stream.binance.vision/ws/"
+               f"{self.state.binance_symbol.lower()}@trade")
         RECV_TIMEOUT_S = 10
         while True:
             try:
@@ -235,7 +245,7 @@ class Bot:
                             except Exception:  # noqa: BLE001
                                 continue
                             pay = d.get("payload", {})
-                            if pay.get("symbol") != "btc/usd":
+                            if pay.get("symbol") != self.state.oracle_symbol:
                                 continue
                             px = float(pay["value"])
                             ts = int(pay["timestamp"])
@@ -482,6 +492,7 @@ class Bot:
                 "signals": self.n_signal, "killed": self.risk.killed,
                 "funnel": next((st.f for st in self.strategies
                                 if hasattr(st, "f")), None),
+                "coin": self.coin,
                 "day_pnl": round(self.risk.day_pnl, 2),
                 "oracle_hist": len(s.oracle_hist),
                 "oracle_rate": s.oracle_rate(), "basis_n": len(s.basis),
@@ -714,13 +725,14 @@ class Bot:
                              self.settle_loop())
 
 
-def acquire_lock(path="logs/bot.lock"):
-    """Refuse to start a second instance.
+def acquire_lock(path):
+    """Refuse to start a second instance FOR THE SAME COIN.
 
-    Two bots sharing logs/paper_fills.jsonl double-count every fill and
+    Two bots sharing one paper_fills.jsonl double-count every fill and
     silently corrupt the paper record that the whole go/no-go decision
-    rests on. An advisory flock is enough: it is released automatically if
-    the process dies, so restarts stay clean.
+    rests on. The lock is per coin, so btc and eth run side by side while a
+    second btc is still refused. An advisory flock is enough: it is
+    released automatically if the process dies, so restarts stay clean.
     """
     import fcntl
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -728,7 +740,7 @@ def acquire_lock(path="logs/bot.lock"):
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        print("another bot/run.py already holds logs/bot.lock — exiting",
+        print(f"another bot/run.py already holds {path} — exiting",
               file=sys.stderr)
         raise SystemExit(3)
     fh.write(str(os.getpid()))
@@ -737,7 +749,15 @@ def acquire_lock(path="logs/bot.lock"):
 
 
 if __name__ == "__main__":
-    _lock = acquire_lock()
+    import argparse
+    from bot.state import COINS
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--coin", default=None, choices=sorted(COINS),
+                    help="which coin this process trades "
+                         "(default: config's `coin`)")
+    args = ap.parse_args()
     cfg = load_cfg()
-    bot = Bot(cfg)
+    coin = args.coin or cfg.get("coin", "btc")
+    _lock = acquire_lock(f"logs/{coin}/bot.lock")
+    bot = Bot(cfg, coin=coin)
     asyncio.run(bot.main())

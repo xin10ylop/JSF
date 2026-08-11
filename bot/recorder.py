@@ -21,6 +21,23 @@ LIVE_DIR = "data/live"
 GAMMA = "https://gamma-api.polymarket.com/markets"
 
 
+def _cfg():
+    try:
+        with open(os.path.join(os.path.dirname(__file__), "config.json")) as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+# Oracle ticks are tiny and a restarted bot backfills its strike window from
+# them, so record every coin we might trade -- an eth bot restarting with no
+# eth history in data/live/rtds sits blind for a whole window.
+RTDS_COINS = tuple(_cfg().get("coins", ["btc"])) or ("btc",)
+# CLOB books are the opposite: 3.8 GB/period for btc alone before pruning.
+# Widen deliberately, and watch disk.
+BOOK_COINS = tuple(_cfg().get("record_book_coins", ["btc"])) or ("btc",)
+
+
 def now_us():
     return int(time.time() * 1_000_000)
 
@@ -114,7 +131,7 @@ async def rtds_writer(queue):
         except Exception:  # noqa: BLE001
             continue
         sym = str(d.get("payload", {}).get("symbol", ""))
-        if not sym.startswith("btc"):
+        if not sym.startswith(RTDS_COINS):
             continue
         w.add(d)
         if queue.empty() or len(w.buf) >= 50:
@@ -152,8 +169,8 @@ async def refresh_assets():
             now = int(time.time())
             for step, fam in [(900, "15m"), (300, "5m")]:
                 t0 = now - (now % step)
-                for k in (0, 1):
-                    slug = f"btc-updown-{fam}-{t0 + k * step}"
+                for coin, k in [(c, k) for c in BOOK_COINS for k in (0, 1)]:
+                    slug = f"{coin}-updown-{fam}-{t0 + k * step}"
                     try:
                         async with session.get(
                                 GAMMA, params={"slug": slug},

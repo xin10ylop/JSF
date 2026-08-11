@@ -298,8 +298,27 @@ class MarketState:
         return tot
 
 
+# Every coin-specific string in one place. BotState carries ONE oracle ring
+# buffer, one vol estimator and one basis series, so a process trades one
+# coin; the multi-coin build runs one process per coin rather than making
+# all of that state a dict, which would touch every pricing path in the
+# file that the reconciliation harness exists to protect.
+COINS = {
+    "btc":  {"binance": "BTCUSDT",  "oracle": "btc/usd"},
+    "eth":  {"binance": "ETHUSDT",  "oracle": "eth/usd"},
+    "sol":  {"binance": "SOLUSDT",  "oracle": "sol/usd"},
+    "xrp":  {"binance": "XRPUSDT",  "oracle": "xrp/usd"},
+    "doge": {"binance": "DOGEUSDT", "oracle": "doge/usd"},
+}
+
+
 class BotState:
-    def __init__(self):
+    def __init__(self, coin="btc"):
+        if coin not in COINS:
+            raise ValueError(f"unknown coin {coin!r}; known: {sorted(COINS)}")
+        self.coin = coin
+        self.binance_symbol = COINS[coin]["binance"]
+        self.oracle_symbol = COINS[coin]["oracle"]
         self.binance_px = None
         self.binance_us = 0
         self.oracle_px = None
@@ -316,7 +335,7 @@ class BotState:
         self.backfill_oracle()
         self.seed_vol()
 
-    def seed_vol(self, symbol="BTCUSDT", bars=3600):
+    def seed_vol(self, symbol=None, bars=3600):
         """Warm-start the vol estimator from recent public 1s klines.
 
         Free and unauthenticated. The endpoint caps at 1000 bars per call,
@@ -325,6 +344,7 @@ class BotState:
         the right order of magnitude. Live updates take over from the first
         tick and roll the oldest returns off the back.
         """
+        symbol = symbol or self.binance_symbol
         try:
             import requests
             end = None
@@ -353,7 +373,7 @@ class BotState:
         except Exception:  # noqa: BLE001
             return None
 
-    def backfill_oracle(self, symbol="btc/usd", lookback_s=1800):
+    def backfill_oracle(self, symbol=None, lookback_s=1800):
         """Seed the oracle ring buffer from the recorder's RTDS log.
 
         The strike is mean(P over [t0-w, t0)), i.e. history from BEFORE a
@@ -363,6 +383,7 @@ class BotState:
         """
         import glob
         import json as _j
+        symbol = symbol or self.oracle_symbol
         cutoff_us = (now_us() - lookback_s * 1_000_000)
         rows = []
         for f in sorted(glob.glob("data/live/rtds/*.jsonl"))[-3:]:

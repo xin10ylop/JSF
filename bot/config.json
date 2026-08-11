@@ -8,11 +8,12 @@
     "max_market_shares": 300,
     "max_market_dollars": 150.0,
     "max_concurrent_markets": 4,
-    "daily_loss_limit": 900.0,
+    "daily_loss_limit": 200.0,
     "stale_binance_s": 3.0,
     "stale_oracle_s": 5.0,
     "stale_book_s": 10.0,
-    "_daily_loss_limit_note": "Set beyond ~1 sd of a normal day (sd ~$420 independent, ~$840 with intraday correlation at 100 sh/market). A tighter limit stops the strategy on noise rather than on a broken edge."
+    "_daily_loss_limit_note": "Set beyond ~1 sd of a normal day (sd ~$420 independent, ~$840 with intraday correlation at 100 sh/market). A tighter limit stops the strategy on noise rather than on a broken edge.",
+    "_per_process_note": "These limits bind PER COIN PROCESS. With coins=5 the aggregate is 5x: $750 of concurrent market exposure and a $1,000 daily stop. daily_loss_limit was cut 900 -> 200 so the aggregate stop stays near the single-coin figure; a per-coin stop also has the advantage of retiring one broken feed instead of the whole book."
   },
   "gz_maker": {
     "enabled": false,
@@ -66,5 +67,18 @@
     "min_order_size": 5.0,
     "use_tape_cap": true
   },
-  "_fill_note": "Measured, not assumed. From 26,603 recorded book snapshots, at a 400ms delay in the 0.92-0.99 band the price we aimed at is still reachable only 63-69% of the time and ~50% of the size we saw survives; the broker previously took 100% of displayed size on 96% of tries. participation=0.5 encodes the surviving-size figure. vol_participation caps the fill at a quarter of what actually PRINTED at our limit in the last vol_window_s -- a displayed ask is an offer, a print is proof somebody supplied that size. min_order_size is the venue's own orderMinSize=5 (live from gamma). reject_rate covers re-validation failures and matching-engine restarts."
+  "_fill_note": "Measured, not assumed. From 26,603 recorded book snapshots, at a 400ms delay in the 0.92-0.99 band the price we aimed at is still reachable only 63-69% of the time and ~50% of the size we saw survives; the broker previously took 100% of displayed size on 96% of tries. participation=0.5 encodes the surviving-size figure. vol_participation caps the fill at a quarter of what actually PRINTED at our limit in the last vol_window_s -- a displayed ask is an offer, a print is proof somebody supplied that size. min_order_size is the venue's own orderMinSize=5 (live from gamma). reject_rate covers re-validation failures and matching-engine restarts.",
+  "coins": [
+    "btc",
+    "eth",
+    "sol",
+    "xrp",
+    "doge"
+  ],
+  "_coins_note": "One bot process per coin (bot/run.py --coin <c>), each with its own oracle buffer, vol estimator and logs/<coin>/ record. Measured on the tape at a 1s decision lag and 200 shares/market: btc +$648, eth +$695, sol +$158, xrp +$424, doge +$371 per day, all five positive under first/uniform/last participation assumptions. btc alone is ~a quarter of the total. ~46 MB RSS per process.",
+  "record_book_coins": [
+    "btc",
+    "eth"
+  ],
+  "_record_book_coins_note": "Recorder CLOB capture is research data, not a trading input -- each bot runs its own CLOB feed. Raw books ran 3.8 GB/period for btc alone before pruning, so widen this only with disk headroom to spare."
 }

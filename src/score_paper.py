@@ -13,6 +13,7 @@ need, the bot's settle lines.
 Run: python3 src/score_paper.py [--log logs/paper_fills.jsonl]
 """
 import argparse
+import glob
 import json
 import os
 from collections import defaultdict
@@ -55,7 +56,14 @@ def outcomes_for(slugs, session):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--log", default="logs/paper_fills.jsonl")
+    # One process per coin means one fill log per coin. Default to all of
+    # them: the whole point of the multi-coin build is the aggregate, and a
+    # scorer that silently reads btc only would hide four fifths of it.
+    ap.add_argument("--log", default=None,
+                    help="fill log(s); default: logs/*/paper_fills.jsonl "
+                         "plus the legacy logs/paper_fills.jsonl")
+    ap.add_argument("--coin", default=None,
+                    help="restrict to one coin's log")
     # The fill log accumulates across builds AND strategies. Scoring all of
     # it mixes, e.g., old vacuum-ladder maker fills at ~0.21 with the
     # current endgame taker -- a meaningless blend. Default to the strategy
@@ -80,33 +88,54 @@ def main():
         import datetime as _dt
         since_us = int(_dt.datetime.strptime(a.since, "%Y-%m-%dT%H:%M")
                        .replace(tzinfo=_dt.timezone.utc).timestamp() * 1e6)
-    if not os.path.exists(a.log):
-        print(f"no fill log at {a.log}")
+    if a.log:
+        logs = [a.log]
+    elif a.coin:
+        logs = [f"logs/{a.coin}/paper_fills.jsonl"]
+    else:
+        logs = sorted(glob.glob("logs/*/paper_fills.jsonl"))
+        if os.path.exists("logs/paper_fills.jsonl"):
+            logs.append("logs/paper_fills.jsonl")
+    logs = [p for p in logs if os.path.exists(p)]
+    if not logs:
+        print("no fill log found (looked for logs/*/paper_fills.jsonl)")
         return
     fills = []
-    for line in open(a.log):
-        try:
-            d = json.loads(line)
-        except Exception:  # noqa: BLE001
-            continue
-        if d.get("kind") not in ("taker_fill", "maker_fill"):
-            continue
-        if a.reason_prefix:
-            r = (d.get("meta") or {}).get("reason", "")
-            if not r.startswith(a.reason_prefix):
+    for path in logs:
+        # logs/<coin>/paper_fills.jsonl -> <coin>; legacy flat log -> btc
+        parts = path.split(os.sep)
+        coin = parts[-2] if len(parts) > 2 and parts[-2] != "logs" else "btc"
+        for line in open(path):
+            try:
+                d = json.loads(line)
+            except Exception:  # noqa: BLE001
                 continue
-        if since_us and d.get("t_us", 0) < since_us:
-            continue
-        if not a.all_latency:
-            if (d.get("meta") or {}).get("seen_px") is None:
+            if d.get("kind") not in ("taker_fill", "maker_fill"):
                 continue
-        if not a.all_oracle:
-            oa = (d.get("meta") or {}).get("oracle_age_s")
-            # Unstamped fills predate the freshness stamp and were taken
-            # while the oracle could silently freeze -- unusable evidence.
-            if oa is None or oa > 20:
-                continue
-        fills.append(d)
+            d["coin"] = coin
+            _keep(d, a, since_us, fills)
+    _report(fills, a)
+
+
+def _keep(d, a, since_us, fills):
+    meta = d.get("meta") or {}
+    if a.reason_prefix and not meta.get("reason", "").startswith(
+            a.reason_prefix):
+        return
+    if since_us and d.get("t_us", 0) < since_us:
+        return
+    if not a.all_latency and meta.get("seen_px") is None:
+        return
+    if not a.all_oracle:
+        oa = meta.get("oracle_age_s")
+        # Unstamped fills predate the freshness stamp and were taken while
+        # the oracle could silently freeze -- unusable evidence.
+        if oa is None or oa > 20:
+            return
+    fills.append(d)
+
+
+def _report(fills, a):
     if not fills:
         print("no latency-realistic fills yet on a verified-fresh oracle "
               "(use --all-latency / --all-oracle to see the earlier history)"
@@ -136,7 +165,8 @@ def main():
         sh = float(f["shares"])
         fee = float(f.get("fee_per_sh", FEE * px * (1 - px)))
         seen = (f.get("meta") or {}).get("seen_px")
-        rows.append({"slug": f["slug"], "side": f["side"], "px": px,
+        rows.append({"coin": f.get("coin", "btc"),
+                     "slug": f["slug"], "side": f["side"], "px": px,
                      "seen_px": seen,
                      "slip": (px - seen) if seen is not None else None,
                      "shares": sh, "fee": fee, "won": bool(won),
@@ -174,6 +204,16 @@ def main():
         lambda x: (x.won * x.shares).sum() / x.shares.sum() > 0.5,
         include_groups=False)
     print(f"  markets won {int(mw.sum())}/{len(mw)}")
+    if sc.coin.nunique() > 1:
+        print("\nby coin:")
+        print(sc.groupby("coin").apply(lambda x: pd.Series({
+            "fills": len(x), "shares": x.shares.sum(),
+            "mkts": x.slug.nunique(),
+            "hit": (x.won * x.shares).sum() / x.shares.sum(),
+            "c_per_sh": x.pnl.sum() / x.shares.sum() * 100,
+            "pnl": x.pnl.sum()}), include_groups=False).to_string(
+                float_format=lambda v: f"{v:,.2f}"))
+
     print("\nby fill price:")
     b = pd.cut(sc.px, [0, .3, .5, .7, .85, .92, .95, .98, 1.0])
     print(sc.groupby(b, observed=True).apply(lambda x: pd.Series({

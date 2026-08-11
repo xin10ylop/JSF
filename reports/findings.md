@@ -300,3 +300,37 @@ Nine new assertions in `src/reconcile_bot.py` cover all of it.
 
 Only real capital settles these. The measured floor for a live micro-test
 is the venue's own `orderMinSize` of 5 shares.
+
+## 8.7 Multi-coin: one process per coin
+
+BTC is about a quarter of the opportunity (section 8.3). The blocker was
+never the edge — it was that `BotState` carries one oracle ring buffer, one
+vol estimator and one basis series, so it describes one coin.
+
+Two ways to fix that. Make all of it a dict keyed by coin, which touches
+every pricing path the reconciliation harness exists to protect; or run one
+process per coin. Measured cost of the second: **46 MB RSS at import**, no
+pandas or scipy in the bot's import graph. Five processes is ~300 MB. The
+refactor buys nothing for that, and process isolation means one coin's dead
+feed cannot take the others down.
+
+So: `bot/run.py --coin eth`, a `jsf-paperbot@.service` template instanced
+per entry in config's `coins`, per-coin `logs/<coin>/` (fills, decisions,
+flock — a second btc is still refused, btc and eth coexist), and
+`src/score_paper.py` / `src/status.py` reading across all of them.
+
+Verified per coin: the Binance symbol and Chainlink oracle symbol resolve
+from one `COINS` map, and the vol seed comes back sane and correctly
+ordered — BTC 1.3e-5, ETH 2.5e-5, DOGE 7.7e-5 per second, all inside the
+plausibility band. An ETH process discovers ETH markets, holds its own CLOB
+feed and ticks its own oracle.
+
+**Risk limits bind per process**, so `daily_loss_limit` went 900 -> 200:
+five coins at 900 would have been a $4,500 aggregate stop. A per-coin stop
+also retires one broken feed rather than the whole book.
+
+The recorder's oracle capture widened to every coin in `coins` — a
+restarted ETH bot backfills its strike window from `data/live/rtds/`, and
+with a btc-only filter it would have sat blind for a full window. Its CLOB
+book capture stays on `record_book_coins` (btc, eth) because raw books ran
+3.8 GB/period for btc alone before pruning.

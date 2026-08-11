@@ -14,14 +14,22 @@ import subprocess
 import sys
 import time
 
-LOG = "logs/decisions.jsonl"
+import glob
 
 
-def last_health():
-    if not os.path.exists(LOG):
+def health_logs():
+    """Every per-coin decisions log, plus the legacy flat one."""
+    paths = sorted(glob.glob("logs/*/decisions.jsonl"))
+    if os.path.exists("logs/decisions.jsonl"):
+        paths.append("logs/decisions.jsonl")
+    return paths
+
+
+def last_health(path):
+    if not os.path.exists(path):
         return None
     last = None
-    with open(LOG) as fh:
+    with open(path) as fh:
         for line in fh:
             if '"health"' in line:
                 last = line
@@ -34,10 +42,32 @@ def last_health():
 
 
 def main():
-    d = last_health()
-    if d is None:
-        print("no health line yet — bot may still be starting")
+    paths = health_logs()
+    if not paths:
+        print("no decisions log yet — no bot has started")
         return
+    for i, p in enumerate(paths):
+        d = last_health(p)
+        # logs/<coin>/decisions.jsonl -> <coin>. The flat legacy path has
+        # no coin directory and predates the `coin` health field.
+        parts = p.split(os.sep)
+        coin = ((d or {}).get("coin")
+                or (parts[-2] if len(parts) > 2 else "btc (legacy log)"))
+        if i:
+            print()
+        print(f"########## {coin.upper()} ".ljust(60, "#"))
+        if d is None:
+            print("no health line yet — bot may still be starting")
+            continue
+        show(d)
+    print("\n=== PAPER FILLS (scored against the venue's outcomes) ===")
+    try:
+        subprocess.run([sys.executable, "src/score_paper.py"], check=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"  scorer failed: {e}")
+
+
+def show(d):
     age = time.time() - d["t_us"] / 1e6
     up = d.get("uptime_s")
     print(f"=== HEALTH  ({age:.0f}s old"
@@ -125,12 +155,6 @@ def main():
             diag.append("firing normally")
         for x in diag:
             print(f"\n  >> {x}")
-
-    print("\n=== PAPER FILLS (scored against the venue's outcomes) ===")
-    try:
-        subprocess.run([sys.executable, "src/score_paper.py"], check=False)
-    except Exception as e:  # noqa: BLE001
-        print(f"  scorer failed: {e}")
 
 
 if __name__ == "__main__":

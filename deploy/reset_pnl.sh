@@ -21,20 +21,22 @@ mkdir -p "$DEST"
 
 # Stop first: the bot holds these files open in append mode, and rotating
 # them underneath a running process leaves fills written to a deleted inode.
-UNITS="jsf-paperbot"
-for u in $UNITS; do
-  systemctl is-active --quiet "$u" && systemctl stop "$u" && echo "stopped $u"
+COINS=$(python3 -c "import json;print(' '.join(json.load(open('bot/config.json')).get('coins',['btc'])))")
+UNITS=$(for c in $COINS; do printf 'jsf-paperbot@%s ' "$c"; done)
+for u in $UNITS jsf-paperbot; do
+  systemctl is-active --quiet "$u" 2>/dev/null && systemctl stop "$u" \
+    && echo "stopped $u"
 done
 
-for f in paper_fills.jsonl decisions.jsonl; do
-  if [ -s "logs/$f" ]; then
-    mv "logs/$f" "$DEST/$f"
-    echo "archived logs/$f -> $DEST/$f  ($(wc -l < "$DEST/$f") lines)"
-  fi
+# logs/<coin>/*.jsonl for the multi-coin build, plus the flat legacy pair
+for src in $(ls logs/*/paper_fills.jsonl logs/*/decisions.jsonl \
+             logs/paper_fills.jsonl logs/decisions.jsonl 2>/dev/null); do
+  [ -s "$src" ] || continue
+  mkdir -p "$DEST/$(dirname "${src#logs/}")"
+  mv "$src" "$DEST/${src#logs/}"
+  echo "archived $src -> $DEST/${src#logs/}  ($(wc -l < "$DEST/${src#logs/}") lines)"
+  : > "$src"     # recreate empty; the flock file is separate, leave it alone
 done
-# The lock is held by flock on an empty file; leave it alone.
-: > logs/paper_fills.jsonl
-: > logs/decisions.jsonl
 
 for u in $UNITS; do
   systemctl start "$u" && echo "started $u"
@@ -42,4 +44,4 @@ done
 
 echo
 echo "clean record started at $STAMP"
-echo "old record: python3 src/score_paper.py --log $DEST/paper_fills.jsonl"
+echo "old record: python3 src/score_paper.py --log $DEST/<coin>/paper_fills.jsonl"

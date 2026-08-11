@@ -3,7 +3,8 @@
 #
 # Installs four units:
 #   jsf-recorder    live Binance / Chainlink-RTDS / CLOB capture
-#   jsf-paperbot    paper trading on the verified trailing-TWAP contract
+#   jsf-paperbot@X  paper trading on the verified trailing-TWAP contract,
+#                   one instance per coin in config.json's `coins`
 #   jsf-prune       hourly: distil endgame books, delete raw (disk guard)
 #   jsf-edgecheck   daily: frozen-parameter decay monitor
 #
@@ -60,15 +61,17 @@ RestartSec=5
 WantedBy=multi-user.target
 UNIT
 
-cat > /etc/systemd/system/jsf-paperbot.service <<'UNIT'
+# One bot process per coin: BotState carries a single oracle buffer and vol
+# estimator, so the coin is a property of the process. ~46 MB RSS each.
+cat > /etc/systemd/system/jsf-paperbot@.service <<'UNIT'
 [Unit]
-Description=JSF paper bot (endgame taker, post-2026-08-07 trailing-TWAP contract)
+Description=JSF paper bot for %i (endgame taker, trailing-TWAP contract)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 WorkingDirectory=/opt/jsf
-ExecStart=/usr/bin/python3 bot/run.py
+ExecStart=/usr/bin/python3 bot/run.py --coin %i
 OOMScoreAdjust=-500
 Restart=always
 RestartSec=5
@@ -76,6 +79,17 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNIT
+
+# The pre-multi-coin single unit, if present, would run a second btc bot
+# against the same logs/btc/bot.lock and flap on the lock forever.
+if systemctl list-unit-files | grep -q '^jsf-paperbot\.service'; then
+  systemctl disable --now jsf-paperbot.service 2>/dev/null || true
+  rm -f /etc/systemd/system/jsf-paperbot.service
+fi
+
+COINS=$(python3 -c "import json;print(' '.join(json.load(open('/opt/jsf/bot/config.json')).get('coins',['btc'])))")
+BOT_UNITS=$(for c in $COINS; do printf 'jsf-paperbot@%s ' "$c"; done)
+echo "bot units: $BOT_UNITS"
 
 # --- disk guard: the recorder writes ~6.5 GB/day of raw book JSONL ---------
 cat > /etc/systemd/system/jsf-prune.service <<'UNIT'
@@ -126,17 +140,20 @@ WantedBy=timers.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now jsf-recorder jsf-paperbot jsf-prune.timer jsf-edgecheck.timer
+# shellcheck disable=SC2086
+systemctl enable --now jsf-recorder $BOT_UNITS jsf-prune.timer jsf-edgecheck.timer
 sleep 3
 systemctl --no-pager --plain status jsf-recorder | head -4
-systemctl --no-pager --plain status jsf-paperbot | head -4
+for u in $BOT_UNITS; do systemctl --no-pager --plain status "$u" | head -3; done
+free -m | head -2
 systemctl --no-pager list-timers 'jsf-*' || true
 cat <<'MSG'
 
 DONE.
-  live bot log     journalctl -u jsf-paperbot -f
-  pricer health    grep '"health"' /opt/jsf/logs/decisions.jsonl | tail -1
-  paper fills      tail -f /opt/jsf/logs/paper_fills.jsonl
+  all coins        cd /opt/jsf && python3 src/status.py
+  live bot log     journalctl -u jsf-paperbot@eth -f
+  paper fills      tail -f /opt/jsf/logs/eth/paper_fills.jsonl
+  one coin scored  cd /opt/jsf && python3 src/score_paper.py --coin eth
   decay history    column -s, -t /opt/jsf/reports/decay_log.csv
   ex-ante depth    cd /opt/jsf && PYTHONPATH=src python3 src/depth_sim.py
 MSG
