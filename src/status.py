@@ -65,12 +65,33 @@ def pnl_by_bot():
     # Fills inside one market settle on one outcome, so the honest
     # denominator is markets, not fills.
     g = sc.groupby("slug").agg(pnl=("pnl", "sum"), sh=("shares", "sum"))
+    tcl = None
     if len(g) > 2:
         mu = g.pnl.sum() / g.sh.sum()
         se = ((g.pnl - mu * g.sh) ** 2).sum() ** 0.5 / g.sh.sum()
         if se > 0:
-            print(f"\n  t = {mu / se:+.2f} clustered by market "
+            tcl = mu / se
+            print(f"\n  t = {tcl:+.2f} clustered by market "
                   f"(n={len(g)} markets, NOT {len(sc)} fills)")
+    if tcl is not None and abs(tcl) < 2.0:
+        print(f"  NOT SIGNIFICANT YET. {len(g)} markets is a handful; the "
+              f"dollar figure above is noise until |t| clears ~2.")
+    # A big headline built out of a few cheap longshots is not this
+    # strategy. Sub-0.50 fills are the bucket whose PRE-change control was
+    # also positive (+2.24c/share), i.e. a different effect that predates
+    # the contract change -- so it must never be allowed to masquerade as
+    # the settlement edge in the summary line.
+    ls = sc[sc.px < 0.5]
+    if len(ls) and sc.pnl.sum() > 0:
+        frac = ls.pnl.sum() / sc.pnl.sum()
+        if frac > 0.4:
+            print(f"  !! {frac:.0%} of that P&L is {len(ls)} fill(s) below "
+                  f"0.50 ({ls.slug.nunique()} market(s)). That is the "
+                  f"LONGSHOT effect, which was positive pre-change too -- "
+                  f"not the settlement edge. Excluding them: "
+                  f"${sc[sc.px >= 0.5].pnl.sum():+,.2f} on "
+                  f"{sc[sc.px >= 0.5].shares.sum():,.0f} shares "
+                  f"({sc[sc.px >= 0.5].pnl.sum() / max(sc[sc.px >= 0.5].shares.sum(), 1) * 100:+.2f}c/share).")
     return d
 
 
