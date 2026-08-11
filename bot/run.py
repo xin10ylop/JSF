@@ -518,6 +518,19 @@ class Bot:
                 "day_pnl": round(self.risk.day_pnl, 2),
                 "oracle_hist": len(s.oracle_hist),
                 "oracle_rate": s.oracle_rate(), "basis_n": len(s.basis),
+                # Report the sigma that ACTUALLY enters z, and which
+                # source it came from. The health line used to show only
+                # s.vol.var -- the Binance-fed estimator -- while
+                # sigma_rel() prefers the oracle-derived one. On this host
+                # the Binance figure read 2.5e-06 for btc against a true 1s
+                # sd near 1.3e-05, so the gauge was 5x off and pointed at a
+                # number that was not in play. Sigma sits in the
+                # DENOMINATOR of z; a wrong reading here is the exact shape
+                # of a bug that already cost this project once.
+                "sigma_used": s.sigma_rel(),
+                "sigma_src": ("oracle" if s.oracle_sigma_rel() is not None
+                              else ("binance" if s.vol.ok() else "NONE")),
+                "sigma_binance": (s.vol.var ** 0.5) if s.vol.var else None,
                 "vol_var": s.vol.var, "binance_px": s.binance_px,
                 "oracle_px": s.oracle_px, "spot_adj": s.spot_adj(),
                 "stale": {k: round(v, 1) for k, v in s.staleness().items()},

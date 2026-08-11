@@ -203,8 +203,21 @@ def show(d):
     print(f"  oracle    ticks={d.get('oracle_hist')} "
           f"rate={rate}/s   age={st_.get('oracle_s')}s   "
           f"basis={d.get('basis_n')}{warn}")
-    v = d.get("vol_var")
-    print(f"  vol       sd={(v ** 0.5):.2e}" if v else "  vol       n/a")
+    su, sb = d.get("sigma_used"), d.get("sigma_binance")
+    if su is not None:
+        src = d.get("sigma_src", "?")
+        line = f"  vol       sd={su:.2e} (from {src}) <- the one z uses"
+        # A 3x gap between the two candidates means one feed is degraded.
+        # Harmless while the good one is preferred, and a live fault the
+        # moment it is not.
+        if sb and (sb / su > 3 or su / sb > 3):
+            line += (f"   [binance reads {sb:.2e}, {sb/su:.1f}x apart "
+                     f"-- that feed is degraded]")
+        print(line)
+    else:
+        v = d.get("vol_var")
+        print(f"  vol       sd={(v ** 0.5):.2e} UNUSABLE, z is not priced"
+              if v else "  vol       n/a")
     print(f"  risk      killed={d.get('killed')} day_pnl={d.get('day_pnl')} "
           f"pending_settle={d.get('pending_settle')}")
     ev = d.get("evals") or 0
