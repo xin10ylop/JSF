@@ -203,8 +203,18 @@ def show(d):
     print(f"  oracle    ticks={d.get('oracle_hist')} "
           f"rate={rate}/s   age={st_.get('oracle_s')}s   "
           f"basis={d.get('basis_n')}{warn}")
+    # "field absent" and "sigma is None" mean completely different things.
+    # An older health line has no sigma_used at all, and treating that as a
+    # fault printed "UNUSABLE, z is not priced" against five perfectly
+    # healthy bots. Distinguish them.
+    has_sigma = "sigma_used" in d
     su, sb = d.get("sigma_used"), d.get("sigma_binance")
-    if su is not None:
+    if not has_sigma:
+        v = d.get("vol_var")
+        print(f"  vol       sd={(v ** 0.5):.2e} (binance estimator; this "
+              f"health line predates sigma_used -- restart to see the "
+              f"sigma that actually prices z)" if v else "  vol       n/a")
+    elif su is not None:
         src = d.get("sigma_src", "?")
         line = f"  vol       sd={su:.2e} (from {src}) <- the one z uses"
         # A 3x gap between the two candidates means one feed is degraded.
@@ -215,9 +225,8 @@ def show(d):
                      f"-- that feed is degraded]")
         print(line)
     else:
-        v = d.get("vol_var")
-        print(f"  vol       sd={(v ** 0.5):.2e} UNUSABLE, z is not priced"
-              if v else "  vol       n/a")
+        print("  vol       !! sigma_rel() returned None -- BOTH estimators "
+              "are outside the plausibility band, so nothing can be priced")
     print(f"  risk      killed={d.get('killed')} day_pnl={d.get('day_pnl')} "
           f"pending_settle={d.get('pending_settle')}")
     ev = d.get("evals") or 0
