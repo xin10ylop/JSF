@@ -68,6 +68,28 @@ echo 'vm.swappiness=20' > /etc/sysctl.d/99-jsf.conf
 sysctl -p /etc/sysctl.d/99-jsf.conf >/dev/null
 free -h
 
+# Everything JSF runs inside one slice with a hard memory ceiling. This box
+# may host other people's work (observed: /opt/polymarketstrat), and five
+# bots plus a recorder measured ~905 MB with the daily edge check pushing
+# the peak past 1.1 GB -- without a ceiling a leak here takes down a
+# neighbour we were asked not to touch. MemoryHigh throttles and reclaims
+# first; MemoryMax is the wall.
+#
+# On a 2 GB host this leaves ~500 MB for the OS and anything else running.
+# Measure the neighbour before trusting that:
+#   systemd-cgtop -b -n1 --order=memory | head
+# and lower these if it needs more. Nothing in JSF is OOM-protected any
+# more -- OOMScoreAdjust=-500 used to make the kernel prefer to kill
+# something else, which is the wrong default on a shared box.
+cat > /etc/systemd/system/jsf.slice <<'UNIT'
+[Unit]
+Description=JSF bots and recorder, memory-bounded as a group
+
+[Slice]
+MemoryHigh=1200M
+MemoryMax=1450M
+UNIT
+
 cat > /etc/systemd/system/jsf-recorder.service <<'UNIT'
 [Unit]
 Description=JSF live data recorder (Binance / Chainlink RTDS / Polymarket CLOB)
@@ -77,7 +99,7 @@ Wants=network-online.target
 [Service]
 WorkingDirectory=/opt/jsf
 ExecStart=/usr/bin/python3 bot/recorder.py
-OOMScoreAdjust=-500
+Slice=jsf.slice
 Restart=always
 RestartSec=5
 
@@ -96,7 +118,7 @@ Wants=network-online.target
 [Service]
 WorkingDirectory=/opt/jsf
 ExecStart=/usr/bin/python3 bot/run.py --coin %i
-OOMScoreAdjust=-500
+Slice=jsf.slice
 Restart=always
 RestartSec=5
 
@@ -123,6 +145,7 @@ Description=JSF book pruner (distil endgame snapshots, reclaim disk)
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/jsf
+Slice=jsf.slice
 ExecStart=/usr/bin/python3 bot/prune.py --window 90 --keep-raw-hours 1
 UNIT
 
@@ -146,8 +169,9 @@ Description=JSF daily edge / decay check
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/jsf
-MemoryMax=700M
+MemoryMax=600M
 Nice=10
+Slice=jsf.slice
 ExecStart=/usr/bin/python3 src/daily_edge_check.py
 UNIT
 
@@ -164,12 +188,14 @@ WantedBy=timers.target
 UNIT
 
 systemctl daemon-reload
+systemctl start jsf.slice 2>/dev/null || true
 # shellcheck disable=SC2086
 systemctl enable --now jsf-recorder $BOT_UNITS jsf-prune.timer jsf-edgecheck.timer
 sleep 3
 systemctl --no-pager --plain status jsf-recorder | head -4
 for u in $BOT_UNITS; do systemctl --no-pager --plain status "$u" | head -3; done
 free -m | head -2
+echo "jsf.slice ceiling: $(cat /sys/fs/cgroup/jsf.slice/memory.max 2>/dev/null || echo unknown)"
 systemctl --no-pager list-timers 'jsf-*' || true
 cat <<'MSG'
 
