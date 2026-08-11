@@ -57,7 +57,7 @@
   "coin": "btc",
   "venue_hold_ms": 250,
   "rtt_ms": 160,
-  "_latency_note": "Total delay = venue_hold_ms + rtt_ms. venue_hold_ms is Polymarket's own documented taker delay on crypto up/down markets, reintroduced 2026-06-05: 'the order is held for 250 ms, then validation runs again and the order is matched or placed on the book', and it cannot be cancelled inside the window. rtt_ms is OUR round trip -- run src/probe_latency.py on the trading host and set the measured p50. The old single latency_ms=150 was a guess and was less than the venue hold alone. The matching engine is in AWS eu-west-2 (London); this droplet is in North Bergen NJ, ~75ms away each way, so a London/Dublin host is worth roughly 140ms of the ~410ms total.",
+  "_latency_note": "Total delay = venue_hold_ms + rtt_ms. venue_hold_ms is Polymarket's own documented taker delay on crypto up/down markets, reintroduced 2026-06-05: 'the order is held for 250 ms, then validation runs again and the order is matched or placed on the book', and it cannot be cancelled inside the window. rtt_ms is OUR round trip -- run src/probe_latency.py on the trading host and set the measured p50. The old single latency_ms=150 was a guess and was less than the venue hold alone. The matching engine is in AWS eu-west-2 (London); this droplet is in North Bergen NJ, ~70-80ms ROUND TRIP away, so a Dublin host saves ~60ms of the ~320ms total -- worth about 4-5% of the edge, not a transformation.",
   "fill": {
     "participation": 0.5,
     "vol_participation": 0.25,

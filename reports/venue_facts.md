@@ -98,8 +98,25 @@ not stop it. Our config's `latency_ms: 150` was therefore smaller than the
 venue's own floor.
 
 **Where the matching engine is.** AWS eu-west-2 (London). The droplet is in
-North Bergen NJ: ~75 ms each way. A London/Dublin host removes ~140 ms of
-the round trip.
+North Bergen NJ: **~70-80 ms round trip** (not each way — an earlier note
+here said 75 ms each way and was wrong). Dublin-London is ~10-12 ms RTT and
+Amsterdam-London ~8 ms; the "0-1 ms from Dublin" figure quoted by VPS
+vendors is below the speed-of-light floor for 464 km and should be ignored.
+
+So a European host saves ~60 ms of a ~320 ms total delay. At the measured
+decay of 0.5c/share per second that is ~0.03c/share, plus ~2 points of fill
+rate from the ask-survival curve: **about 4-5% of the edge.** Worth taking
+because it is cheap, not because it changes the conclusion.
+
+**Jurisdiction beats latency when picking the host.** The Dutch KSA ordered
+Polymarket to halt Dutch operations in February 2026 and upheld it on
+appeal with recurring penalties; the site is close-only from NL and there
+are ISP-level blocks. Reports conflict on whether the CLOB API still
+accepts orders from Amsterdam. Ireland has no such action, and Dublin is
+within ~2-3 ms of Amsterdam's latency to London — so Dublin is strictly
+better: same speed, no regulatory question. Do not host in the UK either
+(matching engine region or not, it is a restricted jurisdiction for
+traders).
 
 **Fees — confirmed live, not inferred.** `GET gamma-api/markets` returns
 `feeSchedule = {"exponent": 1, "rate": 0.07, "takerOnly": true,

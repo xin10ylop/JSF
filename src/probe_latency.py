@@ -63,6 +63,8 @@ def main():
     ap.add_argument("--n", type=int, default=30)
     ap.add_argument("--hold-ms", type=float, default=250.0,
                     help="venue taker hold on crypto up/down markets")
+    ap.add_argument("--write", action="store_true",
+                    help="write the measured p50 into bot/config.json")
     a = ap.parse_args()
 
     # a real, cheap GET that hits the CLOB service itself
@@ -95,6 +97,19 @@ def main():
     print(f"\nSet in bot/config.json:  \"rtt_ms\": {round(rtt)}")
     print(f"Total taker delay to model: {round(rtt)} + {a.hold_ms:.0f} "
           f"(venue hold) = {round(rtt + a.hold_ms)} ms")
+    if a.write:
+        import os
+        p = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "bot", "config.json")
+        with open(p) as fh:
+            cfg = json.load(fh)
+        old = cfg.get("rtt_ms")
+        cfg["rtt_ms"] = round(rtt)
+        with open(p, "w") as fh:
+            json.dump(cfg, fh, indent=2)
+            fh.write("\n")
+        print(f"wrote rtt_ms {old} -> {round(rtt)} into {p} "
+              f"(restart the bot to pick it up)")
     print("\nThe matching engine is in AWS eu-west-2 (London). If p50 is "
           "well above ~20 ms you are paying for distance: a London or "
           "Dublin host cuts it to single digits, and the measured edge "
