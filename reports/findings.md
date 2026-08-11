@@ -202,3 +202,101 @@ price selection rather than prediction — and the one thing that actually
 pays, which the paper could not have seen because it did not exist when the
 paper was written: **a contract that changed underneath a book that has not
 caught up.**
+
+---
+
+# 8. Execution realism: what survives when the fill model stops flattering us
+
+The live paper bot's +6.89c/share on 154/154 winning fills was not a
+result. It was the fill model. Five gaps, each now measured rather than
+assumed.
+
+## 8.1 The 154/154 hit rate was never surprising
+
+Fills inside one market settle on one outcome. 154 fills across 29 markets
+is **29 bets, not 154** — 29/29 at an average price of 0.927 is a ~10%
+event, not the 1-in-100,000 the fill count implies. `src/score_paper.py`
+now reports a market-clustered t alongside the naive one and labels the
+naive one wrong. Nothing was broken here; the statistic was.
+
+## 8.2 The honest edge: decide late, fill only at real prints
+
+`src/tape_latency.py` computes the signal from information available `lag`
+seconds *before* a print, then fills at the print. A print is proof the
+price existed and someone supplied that size — it answers "would we win the
+race", "would we move the book", and "are we a participant absent from the
+data" in one move, because participating in a print means being one of the
+counterparties that really traded.
+
+BTC 5m, post-change, cap 200 shares/market:
+
+| decision lag | c/share | $/day | t (clustered) |
+|--------------|---------|-------|---------------|
+| 0 s | +2.13 | +851 | +2.68 |
+| 1 s | +1.65 | +648 | +2.12 |
+| 2 s | +0.89 | +346 | +1.15 |
+| 3 s | +0.51 | +195 | +0.65 |
+
+**The edge decays about 0.5c/share for every second of decision lag.** Our
+real delay is ~250 ms (venue hold) + RTT, so we sit between the 0 s and 1 s
+rows. Everything below is quoted at lag = 1 s, which is ~2.5x the true
+delay — a conservative bound, not a tuned one.
+
+## 8.3 It is not a BTC artefact
+
+Five coins, 5m family, lag 1 s, cap 200 sh/market, three assumptions about
+*which* prints we win (`first` = we beat everyone to the earliest signal;
+`uniform` = constant participation; `last` = we get only the leftovers):
+
+| coin | sh/day | first | uniform | last | t (uniform) |
+|------|--------|-------|---------|------|-------------|
+| BTC | 39,220 | +$648 | +$531 | +$296 | +3.41 |
+| ETH | 42,111 | +$695 | +$667 | +$471 | +5.98 |
+| SOL | 27,081 | +$158 | +$177 | +$170 | +2.40 |
+| XRP | 32,563 | +$424 | +$450 | +$365 | +4.72 |
+| DOGE | 16,349 | +$371 | +$411 | +$283 | +4.03 |
+| **total** | **157k** | **+$2,296** | **+$2,236** | **+$1,585** | |
+
+Positive in all five coins under all three selection assumptions. BTC 15m
+adds ~$138/day at lag 1 s. The worst case in the table — we are last in
+every queue, in every market — is still **+$1,585/day**.
+
+## 8.4 Is 200 shares/market a real participant?
+
+From the tape: 83 distinct taker wallets per market in the endgame; the
+median wallet takes 10 shares, the 90th percentile 105, the 99th 862, the
+max 8,000. A 200-share cap puts us at the **95th percentile** of existing
+participants and about 4.4% of qualifying flow. Aggressive, and precedented.
+The capacity curve (`src/tape_capacity.py`) is close to linear to ~800
+sh/market and then flattens.
+
+## 8.5 What changed in the bot
+
+* `latency_ms: 150` -> `venue_hold_ms: 250` + `rtt_ms` **measured** by
+  `src/probe_latency.py`. The old guess was smaller than the venue's own
+  mandatory hold.
+* Fills capped at `participation` (0.5) of displayed size — from the
+  measured ~50% survival at 400 ms in the 0.92-0.99 band.
+* Fills capped at `vol_participation` (0.25) of what actually **printed**
+  at our limit in the last 5 s. Depth is an offer; a print is a trade.
+* Orders **walk the book**: size beyond the touch pays the next level.
+* Our own fill **consumes** the liquidity it took.
+* Venue rejections (re-validation failures, matching-engine restarts) and
+  partial fills are modelled and counted.
+* Sub-`orderMinSize` (5 shares) orders are misses, not fills.
+
+Nine new assertions in `src/reconcile_bot.py` cover all of it.
+
+## 8.6 What is still not modelled
+
+* The queue itself. We model *whether* liquidity survives, not our position
+  in it. Polymarket is price-time priority, and we have no visibility into
+  where in a level our order would land.
+* Correlation between missing and being wrong. Misses are drawn
+  independently of the outcome; in reality an ask is pulled precisely when
+  the puller knows something.
+* Our own market impact beyond one order. Repeated participation at 4% of
+  flow would eventually be priced in by the makers we trade against.
+
+Only real capital settles these. The measured floor for a live micro-test
+is the venue's own `orderMinSize` of 5 shares.

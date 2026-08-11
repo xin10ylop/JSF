@@ -156,7 +156,7 @@ class MarketState:
                  "strike", "bids", "asks", "last_trade_px", "last_trade_us",
                  "book_us", "end_px", "w", "k_fixed", "last_oracle_px",
                  "bids_dn", "asks_dn", "book_dn_us",
-                 "lv_up", "lv_dn")
+                 "lv_up", "lv_dn", "tape")
 
     def __init__(self, slug, asset_id_up, t0_us, t1_us, asset_id_dn=None):
         self.w = 30.0 if (t1_us - t0_us) <= 300_000_000 else 60.0
@@ -188,6 +188,11 @@ class MarketState:
         self.last_trade_px = None
         self.last_trade_us = 0
         self.book_us = 0
+        # Realised prints, (t_us, up_price, size). A displayed ask is an
+        # offer; a print is proof that somebody actually supplied that size
+        # at that price. Fills are capped against this, so the bot can never
+        # claim more volume than the market really absorbed.
+        self.tape = deque(maxlen=400)
 
     def on_oracle_tick(self, px, round_ts_us):
         self.last_oracle_px = px
@@ -233,6 +238,64 @@ class MarketState:
         if bb is None:
             return (None, 0.0, "none")
         return (round(1.0 - bb, 4), bbs, "mirror")
+
+    # ---- execution-realism accessors -----------------------------------
+    def depth(self, side, limit):
+        """Levels we could buy `side` at, no worse than `limit`.
+
+        Returns [(price, size)] cheapest first, in the price scale of the
+        side being bought. Taking size that exceeds the top level has to
+        walk up the book -- pretending the whole order fills at the touch is
+        the free lunch the paper broker was helping itself to.
+        """
+        if side == "Up":
+            lv = [(p, s) for p, s in self.asks if p <= limit + 1e-9 and s > 0]
+        elif self.asks_dn:
+            lv = [(p, s) for p, s in self.asks_dn
+                  if p <= limit + 1e-9 and s > 0]
+        else:
+            # no real Down book: mirror the Up bids (buy Down at 1 - bid_up)
+            lv = [(round(1.0 - p, 4), s) for p, s in self.bids
+                  if (1.0 - p) <= limit + 1e-9 and s > 0]
+        return sorted(lv, key=lambda t: t[0])
+
+    def consume(self, side, price, size):
+        """Remove size we just took, so our own order moves the book.
+
+        Without this a burst of orders in the same millisecond each sees the
+        full level and the bot silently trades several times the liquidity
+        that exists. The venue will send the real delta a moment later; this
+        only stops us double-spending the level in the meantime.
+        """
+        if side == "Up":
+            lv, is_up, key, p = self.lv_up, True, "ask", price
+        elif self.asks_dn:
+            lv, is_up, key, p = self.lv_dn, False, "ask", price
+        else:
+            lv, is_up, key, p = self.lv_up, True, "bid", round(1.0 - price, 4)
+        book = lv[key]
+        if p in book:
+            book[p] = max(0.0, book[p] - size)
+            if book[p] <= 0:
+                book.pop(p, None)
+            self._rebuild(is_up)
+
+    def printed(self, side, limit, since_us):
+        """Shares that actually printed at `limit` or better since `since_us`.
+
+        The tape is kept in Up-token prices, so a Down buy at L corresponds
+        to prints at an Up price of 1-L or higher.
+        """
+        tot = 0.0
+        for t_us, px, sz in reversed(self.tape):
+            if t_us < since_us:
+                break
+            if side == "Up":
+                if px <= limit + 1e-9:
+                    tot += sz
+            elif px >= (1.0 - limit) - 1e-9:
+                tot += sz
+        return tot
 
 
 class BotState:
@@ -500,11 +563,13 @@ class BotState:
                 return m
         return None
 
-    def on_trade(self, asset_id, price, ts_ms):
+    def on_trade(self, asset_id, price, ts_ms, size=0.0):
         for m in self.markets.values():
             if m.asset_id_up == asset_id:
                 m.last_trade_px = price
                 m.last_trade_us = now_us()
+                if size > 0:
+                    m.tape.append((m.last_trade_us, price, size))
                 return
 
     # ---- derived -------------------------------------------------------

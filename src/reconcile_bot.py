@@ -268,7 +268,13 @@ def main():
     bt.risk = Risk({})
     bt.decisions = open("logs/reconcile_dec.jsonl", "a")
     bt.pending, bt.pending_settle, bt.n_miss = [], {}, 0
+    bt.n_reject = bt.n_partial = 0
     bt.latency_us = 150_000
+    # participation 1.0 / no tape cap / no rejects isolates the LATENCY
+    # behaviour; the caps get their own checks below.
+    bt.fill_cfg = {"participation": 1.0, "vol_participation": 0.25,
+                   "vol_window_s": 5.0, "reject_rate": 0.0,
+                   "min_order_size": 5.0, "use_tape_cap": False}
     bt.state = BotState()
     bt.state.oracle_hist.clear()
     t1l = int(time.time()) + 300
@@ -293,8 +299,82 @@ def main():
         "filled above the limit price"
     _q(0.99, 10, _n() + 5_000_000); bt._process_pending()
     assert len(bt.pending) == 1, "filled before the latency elapsed"
+    bt.pending.clear()
     print("PASS: taker fills wait for latency, miss when the ask is pulled, "
           "and never exceed the limit")
+
+    # ---- execution realism ----------------------------------------------
+    # Recorded books say that 400ms after we look, the price we aimed at is
+    # reachable ~65% of the time in the 0.92-0.99 band and about half the
+    # size survives. Taking 100% of displayed depth, every time, was the
+    # broker's largest remaining fiction.
+    def fresh(book, tape=(), **cfg):
+        bt.broker.positions.clear()
+        bt.pending.clear()
+        bt.n_miss = bt.n_reject = bt.n_partial = 0
+        m2 = MarketState("exec-5m", "up", (t1l - 300) * 1_000_000,
+                         t1l * 1_000_000, asset_id_dn="dn")
+        bt.state.markets["exec-5m"] = m2
+        m2.set_book(True, [(0.80, 100.0)], book)
+        for px, sz in tape:
+            m2.tape.append((_n(), px, sz))
+        bt.fill_cfg = {"participation": 1.0, "vol_participation": 0.25,
+                       "vol_window_s": 5.0, "reject_rate": 0.0,
+                       "min_order_size": 5.0, "use_tape_cap": False, **cfg}
+        return m2
+
+    def take(m2, limit, size):
+        bt.pending.append({"slug": m2.slug, "side": "Up", "limit": limit,
+                           "size": size, "fire_us": _n() - 1,
+                           "meta": {"reason": "rollavg recon"}})
+        bt._process_pending()
+        return bt.broker.positions.get((m2.slug, "Up"), {"shares": 0.0,
+                                                         "cost": 0.0})
+
+    m2 = fresh([(0.90, 100.0)], participation=0.5)
+    assert take(m2, 0.90, 100)["shares"] == 50.0, \
+        "participation cap not applied to displayed size"
+    assert bt.n_partial == 1, "short fill not counted as partial"
+    print("PASS: we win only `participation` of the displayed size")
+
+    # walking the book: 40 at 0.90 then the rest at 0.93, not all at 0.90
+    m2 = fresh([(0.90, 40.0), (0.93, 500.0)])
+    pos = take(m2, 0.93, 100)
+    assert pos["shares"] == 100.0, f"expected 100 shares, got {pos}"
+    vw = (40 * 0.90 + 60 * 0.93) / 100
+    got_vw = sum(s * p for p, s in [(0.90, 40), (0.93, 60)]) / 100
+    assert abs(vw - got_vw) < 1e-12
+    # cost carries the fee, so compare the share-weighted price implied
+    fee = 0.07 * 0.90 * 0.10 * 40 + 0.07 * 0.93 * 0.07 * 60
+    assert abs(pos["cost"] - (vw * 100 + fee)) < 1e-6, \
+        f"order did not walk the book: cost {pos['cost']}"
+    print("PASS: size beyond the touch walks up the book and pays for it")
+
+    # our own take removes the liquidity we just consumed
+    assert m2.lv_up["ask"].get(0.90, 0.0) == 0.0, "level not consumed"
+    assert abs(m2.lv_up["ask"][0.93] - 440.0) < 1e-9, "wrong amount consumed"
+    print("PASS: our fill removes the liquidity it took")
+
+    # tape cap: 200 displayed but only 40 printed -> 0.25*40 = 10 shares
+    m2 = fresh([(0.90, 200.0)], tape=[(0.90, 40.0)], use_tape_cap=True)
+    assert take(m2, 0.90, 100)["shares"] == 10.0, \
+        "fill exceeded a quarter of what actually printed"
+    # nothing printed at all -> nothing to take
+    m2 = fresh([(0.90, 200.0)], use_tape_cap=True)
+    assert take(m2, 0.90, 100)["shares"] == 0.0 and bt.n_miss == 1, \
+        "filled against depth that never traded"
+    print("PASS: fills are capped by realised prints, not displayed offers")
+
+    # below the venue's own orderMinSize=5 we cannot send an order at all
+    m2 = fresh([(0.90, 6.0)], participation=0.5)
+    assert take(m2, 0.90, 100)["shares"] == 0.0 and bt.n_miss == 1, \
+        "sent an order below the venue minimum size"
+    print("PASS: sub-minimum orders are misses, not fills")
+
+    m2 = fresh([(0.90, 200.0)], reject_rate=1.0)
+    assert take(m2, 0.90, 100)["shares"] == 0.0 and bt.n_reject == 1, \
+        "venue rejection not modelled"
+    print("PASS: venue re-validation rejections are counted, not filled")
 
     print("\nALL RECONCILIATION CHECKS PASSED")
 

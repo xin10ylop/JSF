@@ -80,3 +80,63 @@ Notes:
 2. Makers trade free and get rebates; durable edges are most likely maker.
 3. The fee ~ p(1-p) vanishes at extremes: taker trades at p>0.95 / p<0.05
    cost ~0.2-0.3c/share - the cheap zone.
+
+## Execution mechanics, verified 2026-08-11
+
+Sources: Polymarket docs (order lifecycle, place-orders, taker rebates),
+the Gamma API itself, and 26,603 recorded book snapshots.
+
+**Taker delay — 250 ms, and it is mandatory on exactly our markets.**
+The docs: *"selected crypto and finance up/down markets ... the order is
+held for 250 ms, then validation runs again and the order is matched or
+placed on the book"*, and *"if the market, balance, allowance, or risk
+checks fail when the delay expires, the order is rejected instead of
+matching."* Reintroduced 2026-06-05 (a 500 ms version existed until it was
+removed ~2026-02-23 alongside the dynamic fee). Inside the window the order
+cannot be cancelled; resubmitting is rejected; dropping the connection does
+not stop it. Our config's `latency_ms: 150` was therefore smaller than the
+venue's own floor.
+
+**Where the matching engine is.** AWS eu-west-2 (London). The droplet is in
+North Bergen NJ: ~75 ms each way. A London/Dublin host removes ~140 ms of
+the round trip.
+
+**Fees — confirmed live, not inferred.** `GET gamma-api/markets` returns
+`feeSchedule = {"exponent": 1, "rate": 0.07, "takerOnly": true,
+"rebateRate": 0.2}` on current btc/eth/sol/xrp/doge up-down markets. So
+fee = shares x 0.07 x p x (1-p), takers only, makers rebated 20% of
+collected taker fees. Our 0.07*p*(1-p) is exact.
+
+**Order constraints, live from Gamma:** `orderMinSize = 5` shares,
+`orderPriceMinTickSize = 0.01`.
+
+**Order types.** GTC/GTD rest; FOK fills entirely or not at all; FAK fills
+what it can and cancels the rest. FAK respects a limit (`maxPrice` on a
+buy). BUY size is in shares. FAK is the correct type for this strategy —
+with GTC a missed taker would *rest* at our limit in a market seconds from
+expiry, which is an adversely-selected free option handed to the market.
+
+**Matching.** Price-time priority, unified book: a Yes buy at 0.60 matches
+a No buy at 0.40 by minting a pair. Price improvement accrues to the taker.
+
+**Taker rebates.** Tiered on 30-day weighted volume,
+wV = size x (1 - entry price) x category weight (crypto 2.3). At our fill
+prices (~0.93) the (1-p) term makes this worth ~$1-2/month. Ignore it.
+
+## Ask survival, measured (src/ask_survival.py)
+
+26,603 recorded snapshot pairs, rem 2-60 s. Probability the price we aimed
+at is still reachable after a delay, and the fraction of the size we saw
+that is still there:
+
+| delay | reachable | size kept |
+|-------|-----------|-----------|
+| 150 ms | 82.4% | 71.6% |
+| 400 ms | 75.3% | 64.3% |
+| 1000 ms | 67.9% | 57.5% |
+
+At 400 ms, by the price we aimed at: 0.92-0.95 **63.5% / 49.9%**,
+0.95-0.98 69.1% / 54.6%, 0.98-1.00 89.1% / 76.8%, and worst of all
+0.70-0.85 at 56.7% / 44.6%. The paper broker was reaching its price 96% of
+the time and taking 100% of the size — roughly a 2-3x overstatement in the
+band where it actually trades.

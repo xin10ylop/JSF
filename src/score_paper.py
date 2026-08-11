@@ -157,7 +157,23 @@ def main():
     print(f"per-fill mean ${sc.pnl.mean():+.2f}  sd ${sc.pnl.std():,.2f}")
     if len(sc) > 2:
         se = sc.pnl.std() / (len(sc) ** 0.5)
-        print(f"  t = {sc.pnl.mean()/se:+.2f} on {len(sc)} fills")
+        print(f"  t = {sc.pnl.mean()/se:+.2f} on {len(sc)} fills "
+              f"<- WRONG, assumes fills are independent")
+    # Every Up fill in one market wins or loses together: they settle on one
+    # outcome. 154 fills over 29 markets is 29 bets, not 154, and a run of
+    # 154/154 is really 29/29 -- about a 1-in-10 event at p=0.93, not the
+    # 1-in-100,000 the fill count suggests. Cluster on the slug.
+    g = sc.groupby("slug").agg(pnl=("pnl", "sum"), sh=("shares", "sum"))
+    if len(g) > 2:
+        mu = g.pnl.sum() / g.sh.sum()
+        resid = g.pnl - mu * g.sh
+        se = (resid ** 2).sum() ** 0.5 / g.sh.sum()
+        print(f"  t = {mu/se:+.2f} clustered by market (n={len(g)} markets)"
+              f"   <- the honest one")
+    mw = sc.groupby("slug").apply(
+        lambda x: (x.won * x.shares).sum() / x.shares.sum() > 0.5,
+        include_groups=False)
+    print(f"  markets won {int(mw.sum())}/{len(mw)}")
     print("\nby fill price:")
     b = pd.cut(sc.px, [0, .3, .5, .7, .85, .92, .95, .98, 1.0])
     print(sc.groupby(b, observed=True).apply(lambda x: pd.Series({

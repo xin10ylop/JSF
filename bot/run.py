@@ -12,6 +12,7 @@ Run: python3 bot/run.py            (paper mode, logs to logs/)
 """
 import asyncio
 import json
+import random
 import time
 
 import aiohttp
@@ -54,8 +55,20 @@ class Bot:
         self.decisions = open("logs/decisions.jsonl", "a")
         self.pending_settle = {}   # slug -> MarketState awaiting settlement
         self.pending = []          # latency-delayed taker orders
-        self.latency_us = int(cfg.get('latency_ms', 150) * 1000)
+        # Total delay before a taker order can match. `venue_hold_ms` is the
+        # venue's own documented 250 ms hold on crypto up/down markets ("the
+        # order is held for 250 ms, then validation runs again and the order
+        # is matched or placed on the book"); `rtt_ms` is OUR round trip,
+        # which src/probe_latency.py measures rather than guesses.
+        self.latency_us = int((cfg.get("venue_hold_ms", 250)
+                               + cfg.get("rtt_ms", 160)) * 1000)
+        self.fill_cfg = {"participation": 0.5, "vol_participation": 0.25,
+                         "vol_window_s": 5.0, "reject_rate": 0.01,
+                         "min_order_size": 5.0, "use_tape_cap": True,
+                         **cfg.get("fill", {})}
         self.n_miss = 0            # orders that arrived too late
+        self.n_reject = 0          # venue rejected on re-validation
+        self.n_partial = 0         # filled less than we asked for
         self.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0}
         self.n_clob = 0        # counters surfaced in the health log so a
         self.n_clob_err = 0    # silently-stalled feed is visible at a glance
@@ -364,7 +377,7 @@ class Bot:
             sz = float(ev.get("size", 0))
             if mirror:
                 px = 1.0 - px
-            self.state.on_trade(up_aid, px, ev.get("timestamp"))
+            self.state.on_trade(up_aid, px, ev.get("timestamp"), sz)
             self.broker.on_trade_print(up_aid, px, sz, now_us())
 
     # ---- decision loop -------------------------------------------------
@@ -461,6 +474,8 @@ class Bot:
                 "uptime_s": round((now_us() - self.started_us) / 1e6, 1),
                 "pending_settle": len(self.pending_settle),
                 "pending_orders": len(self.pending), "misses": self.n_miss,
+                "venue_rejects": self.n_reject, "partials": self.n_partial,
+                "latency_ms": self.latency_us // 1000,
                 "rejects": dict(self.n_rej),
                 "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
                 "evals": self.n_eval, "eval_errs": self.n_eval_err,
@@ -476,7 +491,20 @@ class Bot:
                 "detail": mk})
 
     def _process_pending(self):
-        """Execute delayed orders against the book as it is NOW."""
+        """Execute delayed orders against the book as it is NOW.
+
+        Four things stand between a signal and a fill, and the broker used
+        to grant all four for free:
+
+        * the venue holds crypto up/down taker orders 250 ms before matching
+          and the network adds a round trip, so we act on a stale book;
+        * we do not win the whole displayed size -- recorded books say the
+          price we aimed at is still reachable only ~65% of the time in the
+          0.92-0.99 region, and about half the size survives 400 ms;
+        * size beyond the touch pays worse prices, so a big order walks up;
+        * a displayed ask is an offer, a print is a completed trade. Fills
+          are capped at a share of what actually printed at our limit.
+        """
         if not self.pending:
             return
         now = now_us()
@@ -485,23 +513,72 @@ class Bot:
             if now < o["fire_us"]:
                 keep.append(o)
                 continue
-            m = self.state.markets.get(o["slug"])
-            if m is None:
-                self.n_miss += 1
-                continue
-            if o["side"] == "Up":
-                px, sz = m.best_ask()
-            else:
-                px, sz, _src = m.best_ask_dn()
-            if px is None or px > o["limit"] + 1e-9 or sz <= 0:
-                self.n_miss += 1          # the ask we aimed at is gone
-                self.log_decision({"kind": "taker_miss", "slug": o["slug"],
-                                   "side": o["side"], "limit": o["limit"],
-                                   "now_ask": px})
-                continue
-            self.broker.taker_buy(o["slug"], o["side"], px, sz, o["size"],
-                                  meta=o["meta"])
+            self._execute(o, now)
         self.pending = keep
+
+    def _execute(self, o, now):
+        f = self.fill_cfg
+        m = self.state.markets.get(o["slug"])
+        if m is None:
+            self.n_miss += 1
+            return
+        # The venue re-validates when the hold expires and rejects on any
+        # failed check; connection drops and matching-engine restarts land
+        # here too. Modelled as a flat hazard rather than pretended away.
+        if f["reject_rate"] > 0 and random.random() < f["reject_rate"]:
+            self.n_reject += 1
+            self.log_decision({"kind": "taker_reject", "slug": o["slug"],
+                               "side": o["side"], "limit": o["limit"]})
+            return
+        legs_avail = m.depth(o["side"], o["limit"])
+        if not legs_avail:
+            self.n_miss += 1
+            self.log_decision({"kind": "taker_miss", "slug": o["slug"],
+                               "side": o["side"], "limit": o["limit"],
+                               "why": "no_depth_at_limit"})
+            return
+        # cap 1: we are one of many takers racing the same quote
+        budget = o["size"] * 1.0
+        cap_book = sum(sz for _p, sz in legs_avail) * f["participation"]
+        # cap 2: never claim more than the market actually absorbed
+        cap_tape = f["vol_participation"] * m.printed(
+            o["side"], o["limit"], now - int(f["vol_window_s"] * 1e6))
+        want = min(budget, cap_book, cap_tape) if f["use_tape_cap"] \
+            else min(budget, cap_book)
+        if want < f["min_order_size"]:
+            self.n_miss += 1
+            self.log_decision({"kind": "taker_miss", "slug": o["slug"],
+                               "side": o["side"], "limit": o["limit"],
+                               "why": "below_min_size", "want": round(want, 2),
+                               "cap_book": round(cap_book, 1),
+                               "cap_tape": round(cap_tape, 1)})
+            return
+        legs = []
+        left = want
+        for p, sz in legs_avail:
+            take = min(left, sz * f["participation"])
+            if take > 0:
+                legs.append((p, take))
+                left -= take
+            if left <= 1e-9:
+                break
+        got = sum(s for _p, s in legs)
+        if got <= 0:
+            self.n_miss += 1
+            return
+        if got < o["size"] - 1e-9:
+            self.n_partial += 1
+        vwap = sum(p * s for p, s in legs) / got
+        meta = dict(o["meta"])
+        meta["vwap"] = round(vwap, 5)
+        meta["requested"] = o["size"]
+        meta["cap_book"] = round(cap_book, 1)
+        meta["cap_tape"] = round(cap_tape, 1)
+        self.broker.taker_fills(o["slug"], o["side"], legs, meta=meta)
+        # Our own take removes that liquidity: the next order in this same
+        # millisecond must not find it again.
+        for p, s in legs:
+            m.consume(o["side"], p, s)
 
     def _maybe_eval(self, m):
         """Evaluate immediately if this market is inside its settle window."""

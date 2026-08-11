@@ -66,8 +66,18 @@ def main():
     rej = ev - f0
     print(f"  activity  evals={ev:,} errs={d.get('eval_errs')} "
           f"signals={d.get('signals')}")
+    lat = d.get("latency_ms")
     print(f"  orders    pending={d.get('pending_orders')} "
           f"MISSES={d.get('misses')}   <- asks gone by the time we arrive")
+    print(f"            partials={d.get('partials')} "
+          f"venue_rejects={d.get('venue_rejects')}"
+          + (f"   delay={lat}ms (venue hold + our RTT)" if lat else ""))
+    ms, mi = d.get("misses"), (d.get("funnel") or {}).get("fired", 0)
+    if lat and mi and ms is not None and mi > 50 and ms / mi < 0.15:
+        print(f"            !! only {ms/mi:.0%} of orders miss. Recorded "
+              f"books say ~35% of asks in the 0.92-0.99 band are gone "
+              f"within 400ms — a low miss rate means the fill model is "
+              f"still too kind, not that we are fast.")
     if ev and rej > 0:
         rj = d.get("rejects") or {}
         det = " ".join(f"{k}={v:,}" for k, v in rj.items() if v)

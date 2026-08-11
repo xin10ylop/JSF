@@ -51,18 +51,31 @@ class PaperBroker:
                    meta=meta or {})
         return oid
 
+    def taker_fills(self, slug, side_label, legs, meta=None):
+        """Book one taker execution made of one or more price legs.
+
+        `legs` is [(price, shares)] as produced by the caller walking the
+        book. Each leg is logged separately so the scorer sees the real
+        prices paid, not a flattering touch price. Returns total shares.
+        """
+        tot = 0.0
+        for px, sh in legs:
+            if sh <= 0 or px is None:
+                continue
+            fee = 0.07 * px * (1 - px)
+            pos = self.positions.setdefault(
+                (slug, side_label), {"shares": 0.0, "cost": 0.0})
+            pos["shares"] += sh
+            pos["cost"] += sh * (px + fee)
+            self._emit("taker_fill", slug=slug, side=side_label, px=px,
+                       shares=sh, fee_per_sh=fee, meta=meta or {})
+            tot += sh
+        return tot
+
     def taker_buy(self, slug, side_label, ask_px, ask_sz, size, meta=None):
-        take = min(size, ask_sz)
-        if take <= 0 or ask_px is None:
-            return 0.0
-        fee = 0.07 * ask_px * (1 - ask_px)
-        pos = self.positions.setdefault(
-            (slug, side_label), {"shares": 0.0, "cost": 0.0})
-        pos["shares"] += take
-        pos["cost"] += take * (ask_px + fee)
-        self._emit("taker_fill", slug=slug, side=side_label, px=ask_px,
-                   shares=take, fee_per_sh=fee, meta=meta or {})
-        return take
+        """Single-level convenience wrapper (kept for the tests)."""
+        return self.taker_fills(slug, side_label,
+                                [(ask_px, min(size, ask_sz))], meta)
 
     def cancel_all(self, slug=None):
         for o in self.orders:

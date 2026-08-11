@@ -55,6 +55,16 @@
   },
   "_note": "Settlement changed 2026-08-07 to a TRAILING TWAP at BOTH boundaries: Up iff mean(P,[t1-30,t1)) >= mean(P,[t0-30,t0)). Verified on 2,880 settled markets (0.9503 vs 0.8904 for the old rule; 82.7% correct on the 266 disagreeing markets). rollavg_edge trades the venue's failure to re-price this: +3.04c/share at |z|>=2 vs +0.19c on a pre-change control. vacuum_ladder stays off: it harvested last-second spikes, which an average neutralises.",
   "coin": "btc",
-  "latency_ms": 150,
-  "_latency_note": "Marketable orders are held latency_ms then executed against the book as it is THEN, up to the signal price as a limit. Zero-latency fills were producing 63% of paper P&L from sub-0.85 dips that vanish fastest."
+  "venue_hold_ms": 250,
+  "rtt_ms": 160,
+  "_latency_note": "Total delay = venue_hold_ms + rtt_ms. venue_hold_ms is Polymarket's own documented taker delay on crypto up/down markets, reintroduced 2026-06-05: 'the order is held for 250 ms, then validation runs again and the order is matched or placed on the book', and it cannot be cancelled inside the window. rtt_ms is OUR round trip -- run src/probe_latency.py on the trading host and set the measured p50. The old single latency_ms=150 was a guess and was less than the venue hold alone. The matching engine is in AWS eu-west-2 (London); this droplet is in North Bergen NJ, ~75ms away each way, so a London/Dublin host is worth roughly 140ms of the ~410ms total.",
+  "fill": {
+    "participation": 0.5,
+    "vol_participation": 0.25,
+    "vol_window_s": 5.0,
+    "reject_rate": 0.01,
+    "min_order_size": 5.0,
+    "use_tape_cap": true
+  },
+  "_fill_note": "Measured, not assumed. From 26,603 recorded book snapshots, at a 400ms delay in the 0.92-0.99 band the price we aimed at is still reachable only 63-69% of the time and ~50% of the size we saw survives; the broker previously took 100% of displayed size on 96% of tries. participation=0.5 encodes the surviving-size figure. vol_participation caps the fill at a quarter of what actually PRINTED at our limit in the last vol_window_s -- a displayed ask is an offer, a print is proof somebody supplied that size. min_order_size is the venue's own orderMinSize=5 (live from gamma). reject_rate covers re-validation failures and matching-engine restarts."
 }
