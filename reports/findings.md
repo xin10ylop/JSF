@@ -544,3 +544,38 @@ Live `(0.5,0.7]` at hit 1.000 on 84 fills. The refutation showed the null
 it was tested against is contaminated, but did not produce a clean null
 that makes it ordinary. That, and the Binance-vs-Chainlink signal gap, are
 the two open questions.
+
+## 9.5 The "Binance is a noisy proxy" explanation: first evidence is against it
+
+I offered the Binance-vs-Chainlink gap as the leading innocent explanation
+for live beating the tape ~3x. `src/oracle_vs_binance.py` tests it directly:
+apply the identical verified contract to both series on the SAME markets and
+see which agrees with the venue.
+
+On the 15 post-change btc 5m markets where the recorder captured full
+Chainlink coverage of both windows:
+
+* Chainlink-derived rule agrees with the venue **1.0000**
+* Binance-derived rule agrees with the venue **1.0000**
+* the two disagree on **0 of 15** markets
+* margin correlation **0.9997**; sd of (binance - chainlink) margin **2.10**
+  against a Chainlink margin sd of **67.6** — about 3% noise
+
+Fifteen markets is not a result, and the slice is plainly unrepresentative:
+on 1,000 post-change btc markets the Binance-derived rule matches the venue
+only 0.9120, so it does get outcomes wrong ~9% of the time. But those
+errors are concentrated in near-ties, and the strategy only fires at
+|z| >= 2 — i.e. precisely where the two series agree. That reasoning cuts
+against my own hypothesis: the proxy error lives in the markets we do not
+trade.
+
+So the ~3x gap between live and tape is, as of now, **unexplained**. The
+candidates that remain:
+
+* participation model — `--picks first` (greedy, closest to what the bot
+  does) runs ~22% above `uniform` on the same tape. Real, and far too small.
+* something in the live fill path the audit's refutations did not reach.
+
+The recorder began capturing all five coins' oracle ticks continuously on
+2026-08-11, so re-running this in a day gives hundreds of paired markets
+instead of fifteen. That is the cheapest way to close it.
