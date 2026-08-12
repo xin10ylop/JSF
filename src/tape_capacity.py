@@ -81,7 +81,10 @@ def main():
     ap.add_argument("--zmin", type=float, default=2.0)
     ap.add_argument("--max-price", type=float, default=0.99)
     ap.add_argument("--lo-rem", type=float, default=2.0)
-    ap.add_argument("--hi-rem", type=float, default=60.0)
+    # 5m markets are tradable only in their last 30s (bot/strategy.py
+    # gates on rem > min(window_s, m.w), m.w = 30 for 5m). Defaulting to 60
+    # here mixed in prints the bot cannot reach.
+    ap.add_argument("--hi-rem", type=float, default=30.0)
     ap.add_argument("--alpha", type=float, default=0.25,
                     help="share of each real print we assume we could take")
     ap.add_argument("--era", default="post")

@@ -469,10 +469,19 @@ class BotState:
         The fallback is GUARDED against the reference. Measured on the
         Amsterdam host after 20,000s of uptime, the Binance-fed estimator
         had drifted to 2.5e-06 for btc against an oracle reading of
-        1.37e-05 -- 5x low, because the throttled public ws mirror feeds
-        long runs of identical prices and those enter the window as
-        zero returns. It sat inside the plausibility band the whole time,
+        1.37e-05, and it sat inside the plausibility band the whole time,
         so vol.ok() would have waved it through.
+
+        The cause is NOT feed throttling -- an earlier version of this
+        comment said so and was wrong. OnlineVol.update() pairs the LAST
+        price of second k-1 with the FIRST price of second k and then
+        re-anchors, so the open->close move inside every second never
+        enters any return. On the repo's own recorded BTCUSDT tape (32
+        trades/s, 12,463 distinct prices -- not throttled) the class reads
+        1.4e-06 against a true close-to-close 5.1e-05. Decimating that tape
+        RAISES the reading, which is the opposite of what throttling would
+        do; the shortfall scales with trade rate, which is why btc and eth
+        under-read while the thinner sol/xrp/doge tapes do not.
 
         Harmless while the oracle path works, because this method never
         reaches the fallback. But the moment the oracle feed hiccups, an

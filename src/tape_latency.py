@@ -139,7 +139,15 @@ def main():
     ap.add_argument("--zmin", type=float, default=2.0)
     ap.add_argument("--max-price", type=float, default=0.99)
     ap.add_argument("--lo-rem", type=float, default=2.0)
-    ap.add_argument("--hi-rem", type=float, default=60.0)
+    # The bot gates on `rem > min(window_s, m.w)` (bot/strategy.py), and
+    # m.w is 30 for 5m and 60 for 15m -- so a 5m market is only tradable in
+    # its last 30 SECONDS, not 60. Benchmarking against (2,60] compared the
+    # live bot to a tape containing prints it can never reach, and
+    # understated the tape edge by ~25% per share on every coin. None means
+    # "match the family".
+    ap.add_argument("--hi-rem", type=float, default=None,
+                    help="default: 30 for 5m, 60 for 15m -- the window the "
+                         "bot can actually trade")
     ap.add_argument("--cap", type=float, default=200.0,
                     help="max shares per market (our participation limit)")
     ap.add_argument("--lags", default="0,1,2,3")
@@ -153,9 +161,11 @@ def main():
     a = ap.parse_args()
     for coin in a.coins.split(","):
         for fam in a.fams.split(","):
+            _hi = a.hi_rem if a.hi_rem is not None else (
+                30.0 if fam == "5m" else 60.0)
             print(f"\n### {coin.upper()} {fam}  cap={a.cap:g} sh/market  "
                   f"|z|>={a.zmin}  px<={a.max_price}  rem "
-                  f"({a.lo_rem:g},{a.hi_rem:g}]s")
+                  f"({a.lo_rem:g},{_hi:g}]s")
             for era in a.eras.split(","):
                 for lag in [int(x) for x in a.lags.split(",")]:
                     t = build_lagged(coin, a.root, fam, lag, era=era)

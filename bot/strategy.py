@@ -1,3 +1,4 @@
+from collections import deque
 """Signal generation. Parameters come from bot/config.json; the defaults
 here are placeholders until the research verdicts finalize them.
 
@@ -170,7 +171,7 @@ class RollAvgEdge:
         # book timestamp prevents that exactly, with no lost opportunity.
         self.cooldown_s = cfg.get("cooldown_s", 0.0)
         self.last_book = {}
-        self.observations = []
+        self.observations = deque(maxlen=5000)
         self.last_fire = {}
         # Signal funnel: which condition kills each evaluation. Without this
         # a zero-signal bot is indistinguishable from a broken one, and the
@@ -212,8 +213,16 @@ class RollAvgEdge:
         if abs(z) >= self.zmin:
             self.f["z_pass"] += 1
         mid = ((bb + ba) / 2) if (bb is not None and ba is not None) else None
-        self.observations.append((m.slug, rem, mid, fv, z,
-                                  state.fair_legacy(m, t_us)))
+        # fair_legacy() USED to be recorded here on every priced evaluation.
+        # Three things wrong with that, all found by audit: it defeated the
+        # lazy GzPricer (state.py) so all five processes loaded sklearn
+        # anyway, ~72 MB each; it passed vol.var in raw with no ok() check,
+        # no oracle path and no fallback guard -- the one call site in the
+        # bot that could consume a broken sigma; and `observations` is never
+        # read, logged or persisted anywhere in the repo, so it grew without
+        # bound for the life of the process. Keep the cheap diagnostic,
+        # bounded, and drop the expensive one that nothing consumed.
+        self.observations.append((m.slug, rem, mid, fv, z))
         last = self.last_fire.get(m.slug)
         if last is not None and (t_us - last) < self.cooldown_s * 1e6:
             self.f["cooldown"] += 1

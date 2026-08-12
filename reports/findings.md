@@ -449,3 +449,98 @@ post-change side (t=+2.40, +$177/day of the ~$2,600 total). Kept for now,
 but it is the first thing to cut if live paper disagrees, and its 15m
 t=+9.75 on 86 markets should be treated as small-sample rather than as
 reassurance.
+
+---
+
+# 9. Adversarial audit of the live result (2026-08-12)
+
+The 11.4h live paper run reported +$1,958.43, +6.40c/share, t=+4.97 on 308
+markets — roughly 4x the offline tape's ~+1.65c/share. A five-angle audit
+with independent refutation of every finding: **19 of 28 findings refuted,
+9 survived.** Every "fatal" claim was refuted. What follows is what
+survived, and two errors it found in MY OWN comparison rather than the bot.
+
+## 9.1 The benchmark was wrong, not (only) the bot
+
+**The tape window did not match the bot's.** `bot/strategy.py` gates on
+`rem > min(window_s, m.w)` with `m.w = 30` for 5m — so a 5m market is
+tradable only in its **last 30 seconds**. Both `tape_latency.py` and
+`tape_capacity.py` defaulted to `(2,60]`, benchmarking the live bot against
+a tape full of prints it can never reach. Corrected, the tape edge rises
+~25% per share on every coin:
+
+| coin | (2,60] (wrong) | **(2,30] (correct)** | t |
+|------|---------------:|---------------------:|---:|
+| btc | +1.35c | **+1.80c** | +3.67 |
+| eth | +1.58c | **+1.79c** | +4.59 |
+| sol | +0.65c | **+0.96c** | +2.89 |
+| xrp | +1.38c | **+1.55c** | +3.61 |
+| doge | +2.51c | **+3.07c** | +3.66 |
+
+**The tape prices z off the wrong series.** `tape_latency.build_lagged`
+takes K, S, spot and sigma from Binance 1s klines; the contract settles on
+Chainlink, and the live bot reads the actual oracle. So the offline signal
+is a noisy proxy of the live one, and the tape is a *lower bound* on the
+achievable edge, not a fair comparator. This is the leading remaining
+explanation for live > tape and it has not been quantified.
+
+Together these do not close the gap — live +6.38c against a corrected
+~+1.8c is still ~3.5x — but they mean the gap was never 4x, and the
+comparator, not the bot, is where the next measurement belongs.
+
+## 9.2 Fatal claims, all refuted
+
+* *"Fill price comes from displayed depth but size is validated against
+  prints at the limit, so nothing requires a print at the price paid."*
+  **Refuted**: `o["limit"] = sig["px"] = ba`, the best ask, so the limit IS
+  the cheapest displayed level and `depth()` cannot return anything below
+  it. Price and print are coupled.
+* *"Down-side fills execute off a stale Down book."* **Refuted** —
+  the code observations hold but the composition asserted does not exist.
+* *"100% of the outperformance is in sub-0.70 fills, and stripping them
+  puts the run below the tape."* **Refuted**: the arithmetic reproduces but
+  the benchmark it strips against is the contaminated one above.
+
+## 9.3 What survived, in order of consequence
+
+1. **The recorded diagnosis in commit 03d56d9 was wrong.** The Binance vol
+   estimator's under-read is not feed throttling. `OnlineVol.update()`
+   pairs the last price of second k-1 with the FIRST price of second k, so
+   the open->close move inside each second never enters any return. On the
+   repo's own recorded tape (32 trades/s, 12,463 distinct prices — not
+   throttled) it reads 1.4e-06 against a true 5.1e-05. Decimating the tape
+   RAISES the reading, the opposite of throttling. Docstring corrected.
+   No effect on any traded decision: the oracle path always won.
+2. **`fair_legacy()` was on the hot path**, called on every priced
+   evaluation inside an unconditional `observations.append`. It defeated
+   the lazy `GzPricer` (all five processes loaded sklearn anyway, ~72 MB
+   each), passed `vol.var` in raw with no `ok()` check and no fallback
+   guard — the single call site that could consume a broken sigma — and
+   appended to a list nothing in the repo ever reads, unbounded, for the
+   life of the process. Removed; `observations` is now a bounded deque and
+   a warmed process is 56 MB with sklearn absent.
+3. **Every pre/post-change control in this project is ONE DAY.**
+   `rollavg_edge_test.load_1s` reads 1s klines only from
+   `data/binance_alts/{SYM}-1s-{DATE}.zip`, which holds 2026-08-06..09
+   only; any other day is skipped by a bare `except: continue` and dropped
+   by `dropna`. Every "pre-change" figure reported in section 8.11 rests on
+   2026-08-06 alone, 78-104 markets per coin. The controls still point the
+   right way but are far weaker than stated.
+4. **The SOL caveat in 8.11 was an artifact and should be withdrawn.** Its
+   pre-change +1.31c came from `data/pmfree_x4`, a market-level *selection*
+   (fetched with a volume filter), not a full capture. On the complete tape
+   the same day reads **-1.86c (t=-1.14)**. Full-tape pre controls: btc
+   +0.57 (t=+0.43), eth -1.71 (t=-1.06), sol -1.86 (t=-1.14), xrp -0.52
+   (t=-0.48), doge -0.80 (t=-0.52). **SOL's control passes.**
+5. Minor: the "slippage 0% worse" line is structurally forced (the limit is
+   the touch and `depth()` filters to `<= limit`) and should be labelled
+   "price paid vs our limit"; `score_paper.outcomes_for` drops whole
+   100-slug chunks silently on any HTTP error and mislabels them "markets
+   still open".
+
+## 9.4 Still unexplained
+
+Live `(0.5,0.7]` at hit 1.000 on 84 fills. The refutation showed the null
+it was tested against is contaminated, but did not produce a clean null
+that makes it ordinary. That, and the Binance-vs-Chainlink signal gap, are
+the two open questions.
