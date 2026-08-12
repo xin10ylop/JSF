@@ -17,7 +17,16 @@ BRANCH="${BRANCH:-claude/polymarket-btc-binaries-cy1f9p}"
 DIR=/opt/jsf
 
 apt-get update -y
-apt-get install -y python3 python3-pip git
+apt-get install -y python3 python3-pip git chrony
+
+# --- clock: the strategy's gate lives in the last 30s and rem enters z as
+# rem^3, so a couple of seconds of skew systematically misprices every
+# market. chrony steps the clock hard on boot and keeps it within ms after;
+# timesyncd (the Ubuntu default) is fine most days but can drift for hours
+# after a suspend/migration without complaining.
+systemctl enable --now chrony 2>/dev/null || systemctl enable --now chronyd
+sleep 2
+chronyc tracking | head -5 || true
 
 if [ ! -d $DIR ]; then
   git clone --branch "$BRANCH" "$REPO_URL" $DIR
@@ -147,11 +156,16 @@ Type=oneshot
 WorkingDirectory=/opt/jsf
 Slice=jsf.slice
 ExecStart=/usr/bin/python3 bot/prune.py --window 90 --keep-raw-hours 1
+# Retention for the tick captures the pruner does not distil. The oracle
+# capture (rtds) feeds tape_chainlink and the bots' restart backfill; a
+# week is plenty for both, and unbounded it eventually eats the disk.
+ExecStart=/usr/bin/find /opt/jsf/data/live/rtds -name '*.jsonl' -mtime +7 -delete
+ExecStart=/usr/bin/find /opt/jsf/data/live/binance -name '*.jsonl' -mtime +7 -delete
 UNIT
 
 cat > /etc/systemd/system/jsf-prune.timer <<'UNIT'
 [Unit]
-Description=Run the JSF book pruner hourly
+Description=Run the JSF book pruner every 20 minutes
 
 [Timer]
 OnCalendar=*:00/20
