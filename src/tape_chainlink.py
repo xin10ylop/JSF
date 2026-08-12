@@ -268,6 +268,32 @@ def build(coin, fam, hours, lag):
     bs = Series(bsecs, [bser[s] for s in bsecs])
     bsig = rolling_sigma(bser, min(bsecs), max(bsecs))
 
+    # HYBRID spot: basis-adjusted Binance, replicating the LIVE bot's
+    # state.spot_adj. The bot is a hybrid -- settlement-correct K/S/sigma
+    # from the oracle but a sub-second-fresh spot from Binance times the
+    # rolling median basis. Pure-oracle spot is up to ~2s stale at the
+    # decision instant, so CHAINLINK-z alone is a LAGGED version of what
+    # the bot actually computes; HYBRID-z is the faithful replication.
+    ob = {int(t): p for t, p in zip(orc.ts, orc.px)}
+    common = sorted(set(ob) & set(bser))
+    if common:
+        basis = pd.Series([ob[s] / bser[s] for s in common],
+                          index=pd.Index(common))
+        basis = basis.reindex(range(int(lo), int(hi) + 2)).ffill(limit=600)
+        basis_med = basis.rolling(600, min_periods=60).median()
+    else:
+        basis_med = pd.Series(dtype="float64")
+
+    def spot_hybrid(te):
+        s = bs.spot(te, max_age=3.0)
+        try:
+            b = basis_med.loc[int(te)]
+        except KeyError:
+            return None
+        if s is None or not np.isfinite(b):
+            return None
+        return s * b
+
     trades = fetch_trades(sorted(meta.items()))
     rows, skipped = [], {"k_orc": 0, "k_bnc": 0}
     kcache = {}
@@ -291,19 +317,15 @@ def build(coin, fam, hours, lag):
                 skipped["k_bnc"] += 1
         K_o, K_b = kcache[slug]
 
-        def z_from(ser, sig, K):
-            if K is None:
+        def z_from(ser, sig, K, spot):
+            if K is None or spot is None:
                 return None
-            spot = ser.spot(te)
-            sd1 = sig.get(int(te)) if hasattr(sig, "get") else None
-            if sd1 is None or not np.isfinite(sd1):
-                try:
-                    sd1 = sig.loc[int(te)]
-                except KeyError:
-                    return None
-                if not np.isfinite(sd1):
-                    return None
-            if spot is None or sd1 <= 0:
+            sd1 = None
+            try:
+                sd1 = sig.loc[int(te)]
+            except KeyError:
+                return None
+            if sd1 is None or not np.isfinite(sd1) or sd1 <= 0:
                 return None
             S, cov, _ = ser.integral(t1 - w, te)
             if not cov:
@@ -312,12 +334,13 @@ def build(coin, fam, hours, lag):
             sd = sigma * (rem_e ** 3 / 3.0) ** 0.5
             return (S + rem_e * spot - w * K) / sd if sd > 0 else None
 
-        z_o = z_from(orc, osig, K_o)
-        z_b = z_from(bs, bsig, K_b)
+        z_o = z_from(orc, osig, K_o, orc.spot(te))
+        z_b = z_from(bs, bsig, K_b, bs.spot(te))
+        z_h = z_from(orc, osig, K_o, spot_hybrid(te))
         rows.append({"slug": slug, "ts": ts, "rem": rem, "p_up": p_up,
                      "size": size, "is_ask_up": is_ask_up,
                      "is_ask_dn": is_ask_dn, "z_o": z_o, "z_b": z_b,
-                     "won": meta[slug]["up_win"]})
+                     "z_h": z_h, "won": meta[slug]["up_win"]})
     d = pd.DataFrame(rows)
     if len(d):
         n_mkt = d.slug.nunique()
@@ -381,7 +404,8 @@ def main():
                 continue
             for pick in a.picks.split(","):
                 for zcol, name in (("z_b", "BINANCE-z"),
-                                   ("z_o", "CHAINLINK-z")):
+                                   ("z_o", "CHAINLINK-z"),
+                                   ("z_h", "HYBRID-z")):
                     r = run_variant(d, zcol, a.zmin, a.max_price,
                                     a.cap, pick)
                     if r is None:

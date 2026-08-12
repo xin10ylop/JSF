@@ -654,3 +654,58 @@ The droplet has continuous five-coin oracle capture plus free trade tapes
 c/share per coin, the gap is closed mechanically, not by correlation on
 five points. Until then the operating position is: live figures are the
 measurement, tape figures are a floor with a now-quantified handicap.
+
+## 9.7 The definitive test ran, and it REFUTES 9.6
+
+`src/tape_chainlink.py` on the droplet's 24h continuous capture
+(2026-08-12, ~150-270 paired markets per coin, same prints, same fee,
+same caps, only the input series changed):
+
+```
+                 BINANCE-z   CHAINLINK-z   uplift      live c/sh
+btc  5m first      +0.39        -0.88      -1.28         +5.96
+doge 5m first      +3.63        +2.86      -0.77         +4.73
+eth  5m first      +0.79        +0.63      -0.16         +2.12
+sol  5m first      -1.01        +2.46      +3.47         +1.32
+xrp  5m first      +0.61        -0.24      -0.85         +0.51
+```
+
+9.6 predicted Chainlink-z would rise toward the live figures. It does
+not: it is LOWER than Binance-z on four of five coins, and the aggregate
+Chainlink-z tape is ~+0.24c/sh (~$137/day) against a live run rate near
+$1,900/day over an overlapping window. The 9.6 arithmetic (tape + drag =
+live, within 0.02c) was a five-point coincidence -- exactly the risk its
+own caveats flagged. Two things in the table are real and useful anyway:
+**sol and doge keep a significant edge on the correct series** (sol
++2.46 t=+3.51, doge +2.86 t=+4.11), and Chainlink-z hit rates are
+uniformly higher (it fires later, on more-locked prints).
+
+What can still explain live >> every tape, in order of current
+plausibility:
+
+1. **The paper fill model of the record era.** 63.5% of recorded shares
+   are possible re-claims (audit_doubledip upper bound); the strict
+   ledger + direction-aware tape caps (3f0f3bb) only took effect at the
+   end of this window. The clean subset reads +2.99c/sh -- much closer
+   to tape reality than the +3.68 headline.
+2. **The edge is decaying this week.** BOTH input series read near zero
+   on this 24h window against +3.04c on 08-07..09 validation; live had
+   its first negative day the same day (btc kill, the >0.95 band
+   -1.92c/sh on 08-12 vs +1.00 on 08-11). A venue re-pricing after the
+   settlement change is the expected end state; check
+   reports/decay_log.csv and the next strict-model days.
+3. **A mechanical bias in this test, not yet closed:** the LIVE bot's
+   spot is basis-adjusted BINANCE (sub-second fresh, state.spot_adj);
+   my Chainlink-z uses pure oracle spot, stale by up to ~2s at decision
+   time -- a lagged z fires worse. The live bot is a HYBRID (correct
+   K/S/sigma from the oracle + fresh spot from Binance).
+   tape_chainlink now has `--spot hybrid` to replicate exactly that;
+   run it before concluding anything final.
+
+Operating position until the hybrid run and 2-3 strict-model paper days
+land: treat the +3.68c headline as an era artifact, the clean +2.99c as
+the record, ~+1 to +2c as the defensible forward expectation, and DO NOT
+size a live launch off the pre-3f0f3bb record. sol/doge look strongest
+on the correct series; btc's tape edge this window is indistinguishable
+from zero and its live dominance is the number most likely to shrink
+under the strict model.

@@ -58,13 +58,17 @@ against what was already applied.
    high asks; publish the split before live, consider per-side gates).
 5. **Remaining fleet agents** (leakage, launchgap, 3 research) + fold
    their findings into this report and reports/findings.md §10.
-6. **Awaiting droplet data:** fresh tape_chainlink full table (a run was
-   in progress on the droplet; output logs/tape_chainlink.out —
-   recovered fragment from the overwritten first run: xrp 5m
-   BINANCE-z +0.64 vs CHAINLINK-z -0.32); next status.py under the
-   strict fill model (expect lower volume — that's the ledger, not a
-   regression); band_report.py again after ~a week for the skip_px
-   launch decision.
+6. **Awaiting droplet data:** the tape_chainlink 24h table LANDED and
+   REFUTED the 9.6 proxy hypothesis — see findings.md §9.7. Chainlink-z
+   is BELOW Binance-z on 4/5 coins; both tapes read ~0 on the last 24h
+   (edge decay is now a live concern); sol (+2.46 t=+3.51) and doge
+   (+2.86 t=+4.11) keep a real edge on the correct series. NEXT: run
+   `tape_chainlink.py --hours 24` again for the new HYBRID-z variant
+   (replicates the live bot's basis-adjusted Binance spot — the missing
+   piece before final judgment), check reports/decay_log.csv, and get
+   2-3 days of paper under the strict model (deployed 53cee3c). DO NOT
+   size a live launch off the pre-3f0f3bb record; clean subset +2.99c/sh
+   is the number, forward expectation +1 to +2c until proven better.
 7. **Launch config decision pending evidence:** max_price 0.97 or
    skip_px [0.95, 0.98] (band evidence: (0.95,0.98] -2.57c/sh t=-1.19,
    (0.98,1.0] +0.87c/sh t=+13.9); flat 100sh sizing vs per-band sizing.
