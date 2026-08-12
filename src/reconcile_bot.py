@@ -436,6 +436,45 @@ def main():
         "venue rejection not modelled"
     print("PASS: venue re-validation rejections are counted, not filled")
 
+    # ---- halt ladder ----------------------------------------------------
+    # A halt exists to bound the loss when the EDGE breaks, not to punish
+    # variance: streak trip -> cool-off -> half-size probe -> kill or
+    # restore, and the whole state must survive a restart via seed().
+    ok_st = {"oracle_s": 0.1}
+    r1 = Risk({"daily_loss_limit": 1e9,
+               "halt": {"streak_n": 5, "streak_losses": 3, "cooloff_s": 0.5,
+                        "resume_frac": 0.5, "probe_markets": 2,
+                        "probe_losses": 1}})
+    for pnl in (5, -5, 5, -5, -5):          # 3 losses in the last 5
+        r1.on_settle_pnl(pnl)
+    assert not r1.inputs_ok(ok_st, 0.1), "streak breaker did not trip"
+    time.sleep(0.6)
+    assert r1.inputs_ok(ok_st, 0.1), "cool-off did not expire"
+    assert r1.size_ok(0, 0, 100, 0.9, 0) == 50.0, "probe not at half size"
+    r1.on_settle_pnl(-5)                    # probe loss -> breakage real
+    assert r1.killed and r1.size_ok(0, 0, 100, 0.9, 0) == 0.0, \
+        "failed probe did not kill"
+    r2 = Risk({"daily_loss_limit": 1e9,
+               "halt": {"streak_n": 5, "streak_losses": 3, "cooloff_s": 0.2,
+                        "resume_frac": 0.5, "probe_markets": 2,
+                        "probe_losses": 2}})
+    for pnl in (-5, -5, 5, 5, -5):
+        r2.on_settle_pnl(pnl)
+    assert not r2.inputs_ok(ok_st, 0.1)
+    time.sleep(0.3)
+    assert r2.inputs_ok(ok_st, 0.1)
+    r2.on_settle_pnl(5)
+    r2.on_settle_pnl(5)
+    assert r2.probe_left == 0 and r2.size_ok(0, 0, 100, 0.9, 0) == 100.0, \
+        "clean probe did not restore full size"
+    r3 = Risk({"halt": {"streak_n": 5, "streak_losses": 3,
+                        "cooloff_s": 300}})
+    r3.seed(-120.0, [True, False, False, True, False])
+    assert not r3.inputs_ok(ok_st, 0.1), \
+        "seeded streak did not re-arm the halt after a restart"
+    print("PASS: halt ladder -- streak trip, cool-off, half-size probe, "
+          "kill, restore, seed")
+
     print("\nALL RECONCILIATION CHECKS PASSED")
 
 

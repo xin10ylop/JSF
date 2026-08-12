@@ -163,6 +163,14 @@ class RollAvgEdge:
         # real bonus the tape cannot see -- or the edge vanishes, in which
         # case the cheap band was the whole thing and it was not real.
         self.min_price = cfg.get("min_price", 0.0)
+        # Optional [lo, hi) band of ask prices to SKIP, e.g. [0.95, 0.98].
+        # Live (630 mkts): that band reads -2.57c/sh (t=-1.19, not proven)
+        # while its neighbour (0.98,1.0] reads +0.87c at t=+13.9 -- the
+        # contested zone right below lock-in is where adverse selection
+        # bites hardest, the locked zone above it is fine. Ships OFF so
+        # paper keeps measuring every band; flip at launch if the pattern
+        # holds on a week of record.
+        self.skip_px = cfg.get("skip_px") or None
         self.min_rem_s = cfg.get("min_rem_s", 2.0)
         self.require_edge = cfg.get("require_edge", False)
         # Liquidity at <=0.97 arrives as a STREAM, not a resting block: a
@@ -270,8 +278,14 @@ class RollAvgEdge:
         elif (abs(z) >= self.zmin and cands
               and min(cands) < self.min_price):
             self.f["too_cheap"] += 1
-        if (z >= self.zmin and ask_up is not None
-                and self.min_price <= ask_up <= self.max_price):
+        def _px_ok(a):
+            if not (self.min_price <= a <= self.max_price):
+                return False
+            if self.skip_px and self.skip_px[0] <= a < self.skip_px[1]:
+                return False
+            return True
+
+        if z >= self.zmin and ask_up is not None and _px_ok(ask_up):
             ba = ask_up
             if self.require_edge and fv - ba < self.edge_min:
                 return None
@@ -284,8 +298,7 @@ class RollAvgEdge:
                     "oracle_age_s": oa,
                     "reason": f"rollavg z={z:+.2f} emp_fair {fv:.3f} vs ask "
                               f"{ba:.3f} rem {rem:.0f}s"}
-        if (z <= -self.zmin and ask_dn is not None
-                and self.min_price <= ask_dn <= self.max_price):
+        if z <= -self.zmin and ask_dn is not None and _px_ok(ask_dn):
             if self.require_edge and (1 - fv) - ask_dn < self.edge_min:
                 return None
             self.f["fired"] += 1

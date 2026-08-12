@@ -120,7 +120,7 @@ class Bot:
         """
         path = os.path.join(self.logdir, "decisions.jsonl")
         day_start_us = int(time.time() // 86400) * 86400 * 1_000_000
-        total, n = 0.0, 0
+        total, outcomes = 0.0, []
         try:
             with open(path, "rb") as fh:
                 fh.seek(0, 2)
@@ -139,15 +139,16 @@ class Bot:
                 continue
             if d.get("kind") != "settled" or d.get("t_us", 0) < day_start_us:
                 continue
-            total += float(d.get("pnl", 0.0))
-            n += 1
-        if n:
-            self.risk.day_pnl = total
-            if total < -abs(self.risk.daily_loss_limit):
-                self.risk.killed = True
-            self.log_decision({"kind": "day_pnl_seeded", "n_settles": n,
+            pnl = float(d.get("pnl", 0.0))
+            total += pnl
+            if pnl != 0:
+                outcomes.append(pnl > 0)
+        if outcomes:
+            self.risk.seed(total, outcomes)
+            self.log_decision({"kind": "day_pnl_seeded",
+                               "n_settles": len(outcomes),
                                "day_pnl": round(total, 2),
-                               "killed": self.risk.killed})
+                               "state": self.risk.state_str()})
 
     def log_decision(self, obj):
         obj["t_us"] = now_us()
@@ -588,6 +589,8 @@ class Bot:
                 "clob_drops": self.n_clob_drop, "resubs": self.n_resub,
                 "evals": self.n_eval, "eval_errs": self.n_eval_err,
                 "signals": self.n_signal, "killed": self.risk.killed,
+                "risk_state": self.risk.state_str(),
+                "halts": self.risk.halts,
                 "funnel": next((st.f for st in self.strategies
                                 if hasattr(st, "f")), None),
                 "coin": self.coin,
@@ -629,7 +632,7 @@ class Bot:
         """
         if not self.pending:
             return
-        if self.risk.killed:
+        if self.risk.killed or self.risk.in_cooloff():
             # The daily-loss kill switch blocks new SIGNALS via inputs_ok,
             # but orders already inside the latency window would still land.
             # A real kill has to stop those too -- live, this is the cancel
@@ -767,7 +770,7 @@ class Bot:
             # for as long as the throttled public mirror stayed stale, i.e.
             # nearly always. A diagnostic that names the wrong cause is
             # worse than no diagnostic.
-            if self.risk.killed:
+            if self.risk.killed or self.risk.in_cooloff():
                 self.n_rej["killed"] += 1
             elif st["oracle_s"] >= self.risk.stale_oracle_s:
                 self.n_rej["oracle"] += 1

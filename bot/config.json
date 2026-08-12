@@ -8,12 +8,21 @@
     "max_market_shares": 300,
     "max_market_dollars": 150.0,
     "max_concurrent_markets": 4,
-    "daily_loss_limit": 200.0,
+    "daily_loss_limit": 400.0,
     "stale_binance_s": 3.0,
     "stale_oracle_s": 5.0,
     "stale_book_s": 10.0,
-    "_daily_loss_limit_note": "Set beyond ~1 sd of a normal day (sd ~$420 independent, ~$840 with intraday correlation at 100 sh/market). A tighter limit stops the strategy on noise rather than on a broken edge.",
-    "_per_process_note": "These limits bind PER COIN PROCESS. With coins=5 the aggregate is 5x: $750 of concurrent market exposure and a $1,000 daily stop. daily_loss_limit was cut 900 -> 200 so the aggregate stop stays near the single-coin figure; a per-coin stop also has the advantage of retiring one broken feed instead of the whole book."
+    "halt": {
+      "streak_n": 20,
+      "streak_losses": 6,
+      "cooloff_s": 7200,
+      "resume_frac": 0.5,
+      "probe_markets": 10,
+      "probe_losses": 3
+    },
+    "_halt_note": "The ladder: 6 losses in the last 20 settled markets (~4e-3 under the healthy record's 0.95 hit) -> 2h cool-off; then a 10-market probe at half size, 3 probe losses -> killed to end of UTC day. Detects a BROKEN edge in ~20 markets instead of waiting for dollars to drain, while a variance trip costs 2 hours, not a day.",
+    "_daily_loss_limit_note": "Raised 200 -> 400 with the streak breaker in front of it. $200 was ~1 sd of a btc day at current caps and tripped 2026-08-12 on variance, idling the most profitable bot for six hours (~$140 of expected P&L forgone per false trip). The dollar stop is now the backstop against slow bleeds the streak test cannot see; the streak breaker is the fast tripwire for actual breakage.",
+    "_per_process_note": "These limits bind PER COIN PROCESS. With coins=5 the aggregate is 5x: $750 of concurrent market exposure and a $2,000 daily backstop -- but the streak breakers make reaching the aggregate backstop on variance alone vanishingly unlikely (five independent 2.5-sigma coin-days at once)."
   },
   "gz_maker": {
     "enabled": false,
@@ -53,6 +62,8 @@
     "_gate_note": "VALIDATED gate = |z|>=zmin and ask<=max_price. require_edge adds empirical_fair-ask>=edge_min, which measures +10.15c/share but on 5x fewer shares at avg px 0.389 and with a +2.24c pre-change control -- a different (longshot) effect, not the settlement change. Keep it false until paper measures it separately.",
     "cooldown_s": 0.0,
     "_max_price_note": "Raised 0.97 -> 0.99. The 0.985-0.990 band alone holds 1.22M of the 2.6M qualifying shares and still pays +0.57c/share (hit 0.996) because the fee collapses to 0.07c up there; pre-change control in the same band is -0.64c. Capping at 0.97 refused 97.7% of strong signals (px_pass 2.3% live) and left 2.5x the shares on the table. Blended EV falls 7.37c -> 3.30c but the pool grows to $29.3K/day and markets/day 367 -> 862. NOTE the payoff shape up there is ~79:1 against: a loss costs ~98.75c/share, so the dollar cap matters more than the share cap.",
+    "skip_px": null,
+    "_skip_px_note": "[lo, hi) ask band to refuse, e.g. [0.95, 0.98]. Live evidence (630 mkts, 27.8h): (0.95,0.98] reads -2.57c/sh (t=-1.19, NOT yet proven) while (0.98,1.0] reads +0.87c/sh at t=+13.9 hit 0.999 -- the contested zone right below lock-in is where the 276ms delay's adverse selection bites; the locked zone above it stays good. OFF so paper measures every band; the launch config flips it if a week of record confirms. band_report.py is the evidence tool.",
     "min_price": 0.0,
     "_min_price_note": "OFF (0.0). Added to test whether the sub-0.70 fills -- 9% of live shares and 61% of live P&L -- were an artifact. On the CORRECTED tape window (rem<=30s for 5m) they are not: the tape's own bucket profile has the same shape. Tape btc c/share by bucket: (0,0.3] +8.93 hit 0.18, (0.3,0.5] +17.71 hit 0.62, (0.5,0.7] +15.93 hit 0.78, against (0.7,0.85] +11.03, (0.85,0.92] +1.91, (0.92,0.95] +4.74, (0.95,0.98] +1.38, (0.98,1] +0.56. At alpha 0.25 the tape puts $2,721/day of $4,656 -- 58% -- in the sub-0.70 band, against live's 61%. Cheap fills paying most of the P&L is what this strategy DOES, not a symptom. Setting min_price=0.70 would cut the most profitable region on a misreading. Kept as a flag because it is still the clean way to isolate the bands if the live gap ever needs settling."
   },
