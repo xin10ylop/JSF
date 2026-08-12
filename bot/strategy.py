@@ -154,6 +154,15 @@ class RollAvgEdge:
         self.edge_min = cfg.get("edge_min", 0.02)
         self.size = cfg.get("size", 100)
         self.max_price = cfg.get("max_price", 0.97)
+        # Floor on the price we will pay. Default 0.0 = off, unchanged.
+        # Live, fills below 0.70 are 9% of shares and 61% of P&L at hit
+        # rates 2-3x what the tape says that region pays. Above 0.70 live
+        # and tape agree closely. Setting this to 0.70 trades ONLY the
+        # region where the two measurements agree, so a forward run either
+        # lands near the tape's rate -- in which case the cheap band is a
+        # real bonus the tape cannot see -- or the edge vanishes, in which
+        # case the cheap band was the whole thing and it was not real.
+        self.min_price = cfg.get("min_price", 0.0)
         self.min_rem_s = cfg.get("min_rem_s", 2.0)
         self.require_edge = cfg.get("require_edge", False)
         # Liquidity at <=0.97 arrives as a STREAM, not a resting block: a
@@ -177,7 +186,8 @@ class RollAvgEdge:
         # a zero-signal bot is indistinguishable from a broken one, and the
         # backtest implies ~4 qualifying BTC 5m markets per hour.
         self.f = {"eval": 0, "in_window": 0, "priced": 0, "book": 0,
-                  "z_pass": 0, "px_pass": 0, "cooldown": 0, "fired": 0}
+                  "z_pass": 0, "px_pass": 0, "too_cheap": 0, "cooldown": 0,
+                  "fired": 0}
 
     def evaluate(self, state, m, t_us):
         self.f["eval"] += 1
@@ -254,9 +264,14 @@ class RollAvgEdge:
 
         cands = [p for p in (ask_up if z > 0 else None,
                              ask_dn if z < 0 else None) if p is not None]
-        if abs(z) >= self.zmin and cands and min(cands) <= self.max_price:
+        if (abs(z) >= self.zmin and cands
+                and self.min_price <= min(cands) <= self.max_price):
             self.f["px_pass"] += 1
-        if z >= self.zmin and ask_up is not None and ask_up <= self.max_price:
+        elif (abs(z) >= self.zmin and cands
+              and min(cands) < self.min_price):
+            self.f["too_cheap"] += 1
+        if (z >= self.zmin and ask_up is not None
+                and self.min_price <= ask_up <= self.max_price):
             ba = ask_up
             if self.require_edge and fv - ba < self.edge_min:
                 return None
@@ -269,8 +284,8 @@ class RollAvgEdge:
                     "oracle_age_s": oa,
                     "reason": f"rollavg z={z:+.2f} emp_fair {fv:.3f} vs ask "
                               f"{ba:.3f} rem {rem:.0f}s"}
-        if z <= -self.zmin and ask_dn is not None \
-                and ask_dn <= self.max_price:
+        if (z <= -self.zmin and ask_dn is not None
+                and self.min_price <= ask_dn <= self.max_price):
             if self.require_edge and (1 - fv) - ask_dn < self.edge_min:
                 return None
             self.f["fired"] += 1
