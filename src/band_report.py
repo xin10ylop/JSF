@@ -99,6 +99,22 @@ def main():
         print(f"{cap:>10.2f} {x.shares.sum():>9,.0f} {x.pnl.sum():>+10.2f} "
               f"{usd_day:>+8,.0f} {c:>+7.2f} {t:>+6.2f}")
 
+    # Per-SIDE split. The calibration table is asymmetric (favoured side
+    # wins 0.888 as Up but only 0.808 as Down at |z|=2.5 on the 3-day
+    # sample it was fit on) yet both sides share one zmin and one
+    # max_price. If the live record shows the same skew, the Down side
+    # needs its own gate; if not, the table baked in a 3-day up-drift.
+    print("\nby side (the calib-asymmetry check):")
+    for side, x in d.groupby("side"):
+        if not len(x):
+            continue
+        w = x.shares.sum()
+        c, t, n = cluster(x)
+        print(f"  {side:<5} {len(x):>5} fills {w:>9,.0f} sh  "
+              f"avg px {(x.px * x.shares).sum() / w:.4f}  "
+              f"hit {(x.won * x.shares).sum() / w:.3f}  "
+              f"{c:>+6.2f}c/sh  t={t:>+5.2f}  ({n} mkts)")
+
     # Day-by-day consistency of the two big high bands: a band can be
     # rescued or condemned by one bad day, and that is worth seeing.
     d["day"] = pd.to_datetime(d.t_us, unit="us", utc=True).dt.strftime(
