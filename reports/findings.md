@@ -709,3 +709,52 @@ size a live launch off the pre-3f0f3bb record. sol/doge look strongest
 on the correct series; btc's tape edge this window is indistinguishable
 from zero and its live dominance is the number most likely to shrink
 under the strict model.
+
+## 9.8 HYBRID-z lands: the story is now coherent
+
+The faithful replication of the live bot's computation -- oracle K/S and
+sigma, basis-adjusted Binance spot -- on a fresh 24h window:
+
+```
+            BINANCE-z  CHAINLINK-z  HYBRID-z (t)      live 27.8h
+btc  5m       +0.61       -0.91     +0.78 (+0.50)       +5.96
+doge 5m       +4.38       +3.21     +5.18 (+2.14)       +4.73
+eth  5m       +2.53       +0.60     +0.36 (+0.21)       +2.12
+sol  5m       -1.37       +2.50     +3.11 (+1.31)       +1.32
+xrp  5m       +2.11       +1.26     +0.19 (+0.17)       +0.51
+     aggregate ~ +$694/day at 200 sh/mkt caps, ~+1.2c/share
+```
+
+Three coins now RECONCILE: doge (tape +5.18 vs live +4.73), xrp (+0.19
+vs +0.51), sol (+3.11 vs +1.32, tape above live). The residual gap is
+concentrated in btc (live 5.96 vs tape 0.78) and eth (2.12 vs 0.36) --
+and btc is precisely where the double-dip audit found the loosest fills
+(btc flagged subset +8.47c/sh carrying $1,245 of its $1,579; btc clean
+reads +2.83). The remaining story, stated plainly:
+
+* the edge is REAL but currently ~+1c/share, ~$700/day at these caps --
+  not the $1,900/day the loose-era record extrapolated;
+* the record's excess over that was mostly fill-model looseness, which
+  3f0f3bb has now closed; the strict-model paper days should land near
+  the hybrid tape, and if they land meaningfully above it the tape's
+  print-based fill assumption is what's pessimistic;
+* window-to-window variance is large (Binance-z eth read +0.79 and
+  +2.53 on two overlapping 24h windows two hours apart) -- single days
+  prove nothing in either direction;
+* doge and sol carry the most reliable signal on the correct series;
+  btc -- the volume king of the record -- is the least proven forward.
+
+**New finding: the decay monitor has been blind since 2026-08-09.**
+daily_edge_check reads 1s klines only from data/binance_alts zips, which
+end 08-09, so decay_log.csv silently stopped exactly when decay became
+the launch question. Fixed: the edgecheck timer now also runs
+tape_chainlink --hours 24 --csv reports/hybrid_decay.csv daily -- a
+self-sufficient decay row on the correct input series. The doge 08-09
+decay row (ev 16.9c, pool $3.5k) is the longshot-day outlier, not trend.
+
+**Launch bar, restated against the original brief:** "$10/day is not the
+target." The honest current estimate -- ~$700/day at 200-share caps
+before any capacity scaling, concentrated in doge/sol, with btc/eth
+awaiting strict-model proof -- still clears the bar IF it holds through
+2-3 strict-model days and the hybrid decay rows do not trend to zero.
+That is the go/no-go evidence now accumulating on its own.

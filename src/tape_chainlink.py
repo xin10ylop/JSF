@@ -393,6 +393,13 @@ def main():
     ap.add_argument("--max-price", type=float, default=0.99)
     ap.add_argument("--cap", type=float, default=200.0)
     ap.add_argument("--picks", default="first,uniform")
+    # The ORIGINAL decay monitor (daily_edge_check -> decay_log.csv) reads
+    # 1s klines only from data/binance_alts zips, which end 2026-08-09 --
+    # it has been silently blind since, which is exactly when decay became
+    # the launch-deciding question. This appends the same kind of daily
+    # row from the self-sufficient hybrid tape instead.
+    ap.add_argument("--csv", default=None,
+                    help="append per-coin rows to this CSV (decay monitor)")
     a = ap.parse_args()
     print(f"paired tape: BINANCE-z vs CHAINLINK-z, lag {a.lag:g}s, "
           f"|z|>={a.zmin:g}, px<={a.max_price:g}, cap {a.cap:g} sh/mkt\n")
@@ -434,6 +441,26 @@ def main():
               "in src/status.py.\nIf they land close, the live-vs-tape gap "
               "was the Binance proxy and the live\nrun needs no other "
               "explanation.")
+        if a.csv:
+            import csv as _csv
+            import os as _os
+            new = not _os.path.exists(a.csv)
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            with open(a.csv, "a", newline="") as fh:
+                wcsv = _csv.writer(fh)
+                if new:
+                    wcsv.writerow(["run_day", "hours", "coin", "fam",
+                                   "pick", "src", "sh_day", "c_sh", "hit",
+                                   "usd_day", "t", "n_mkt"])
+                for r in agg:
+                    wcsv.writerow([day, a.hours, r["coin"], r["fam"],
+                                   r["pick"], r["src"],
+                                   round(r["sh_day"], 1),
+                                   round(r["c_sh"], 3),
+                                   round(r["hit"], 4),
+                                   round(r["usd_day"], 2),
+                                   round(r["t"], 2), r["n_mkt"]])
+            print(f"\nappended {len(agg)} rows to {a.csv}")
 
 
 if __name__ == "__main__":

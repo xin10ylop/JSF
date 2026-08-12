@@ -185,8 +185,14 @@ Type=oneshot
 WorkingDirectory=/opt/jsf
 MemoryMax=600M
 Nice=10
-Slice=jsf.slice
+# NOT in jsf.slice: its 600M allowance on top of the bots pushed the
+# slice past MemoryMax=900M at 02:30 UTC daily -- cgroup reclaim stalls
+# every bot's event loop mid-settle-window, or the OOM killer takes one.
 ExecStart=/usr/bin/python3 src/daily_edge_check.py
+# The self-sufficient decay row: daily_edge_check's kline zips end at
+# 2026-08-09 and it silently stopped appending. The hybrid tape fetches
+# everything itself and measures the edge on the CORRECT input series.
+ExecStart=/usr/bin/python3 -u src/tape_chainlink.py --hours 24 --picks first --csv reports/hybrid_decay.csv
 UNIT
 
 cat > /etc/systemd/system/jsf-edgecheck.timer <<'UNIT'
