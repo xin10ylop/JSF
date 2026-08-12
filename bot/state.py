@@ -59,6 +59,19 @@ VOL_SD_MAX = 5e-4
 # Refuse to price if the newest oracle ROUND is older than this.
 MAX_ORACLE_AGE_S = 20.0
 
+# Refuse to price/settle when the oracle history has a HOLE bigger than
+# this inside the window being integrated. The held-price integral is the
+# right model for the feed's normal 1-3s tick gaps; across a 17s outage it
+# fabricates a price path, and both z and the settle grade inherit it.
+MAX_HOLE_S = 5.0
+
+# Do not latch the strike until this long after t0: Chainlink rounds
+# arrive 1.6-2.8s after their round timestamps (measured p50/p99 on
+# data/live/rtds), so a latch inside that lag freezes a K that is missing
+# the strike window's final ticks -- permanently, on the exact 3-sigma
+# boundary moves this strategy trades.
+K_LATCH_GRACE_US = 3_500_000
+
 
 class OnlineVol:
     """One-hour TRAILING standard deviation of 1s log returns.
@@ -265,13 +278,25 @@ class MarketState:
         return self.asks[0] if self.asks else (None, 0.0)
 
     def best_ask_dn(self):
-        """Real Down ask, falling back to the Up-book mirror if absent."""
+        """Cheapest EXECUTABLE Down price across both sources.
+
+        The CLOB crosses a Down BUY against a resting Down ask directly,
+        OR against a complementary Up BID by minting a complete set (two
+        buys whose prices sum >= 1). So the executable Down price is
+        min(real down ask, 1 - best up bid) -- returning the real book
+        whenever it merely existed rejected trades that were executable
+        through the mirror at a better price, exactly in the 0.98-0.99
+        region that carries most of the qualifying volume.
+        """
+        cands = []
         if self.asks_dn:
-            return self.asks_dn[0] + ("book",)
+            cands.append(self.asks_dn[0] + ("book",))
         bb, bbs = self.best_bid()
-        if bb is None:
+        if bb is not None:
+            cands.append((round(1.0 - bb, 4), bbs, "mirror"))
+        if not cands:
             return (None, 0.0, "none")
-        return (round(1.0 - bb, 4), bbs, "mirror")
+        return min(cands, key=lambda t: t[0])
 
     # ---- execution-realism accessors -----------------------------------
     def depth(self, side, limit):
@@ -284,13 +309,14 @@ class MarketState:
         """
         if side == "Up":
             lv = [(p, s) for p, s in self.asks if p <= limit + 1e-9 and s > 0]
-        elif self.asks_dn:
+        else:
+            # BOTH sources are executable for a Down buy: the real Down
+            # asks, and the Up bids via minting (buy Down at 1 - bid_up).
+            # They are distinct resting orders, so the ladders merge.
             lv = [(p, s) for p, s in self.asks_dn
                   if p <= limit + 1e-9 and s > 0]
-        else:
-            # no real Down book: mirror the Up bids (buy Down at 1 - bid_up)
-            lv = [(round(1.0 - p, 4), s) for p, s in self.bids
-                  if (1.0 - p) <= limit + 1e-9 and s > 0]
+            lv += [(round(1.0 - p, 4), s) for p, s in self.bids
+                   if (1.0 - p) <= limit + 1e-9 and s > 0]
         return sorted(lv, key=lambda t: t[0])
 
     def consume(self, side, price, size):
@@ -303,7 +329,9 @@ class MarketState:
         """
         if side == "Up":
             lv, is_up, key, p = self.lv_up, True, "ask", price
-        elif self.asks_dn:
+        elif price in self.lv_dn["ask"]:
+            # a Down leg may have come from the real Down book or from a
+            # mirrored Up bid; decrement whichever holds that price
             lv, is_up, key, p = self.lv_dn, False, "ask", price
         else:
             lv, is_up, key, p = self.lv_up, True, "bid", round(1.0 - price, 4)
@@ -315,19 +343,26 @@ class MarketState:
             self._rebuild(is_up)
 
     def printed(self, side, limit, since_us):
-        """Shares that actually printed at `limit` or better since `since_us`.
+        """Shares that printed at `limit` or better since `since_us`, in
+        the DIRECTION that proves liquidity for OUR buy.
 
-        The tape is kept in Up-token prices, so a Down buy at L corresponds
-        to prints at an Up price of 1-L or higher.
+        The tape is kept in Up-token prices with the aggressor direction
+        (buy_up=True means the taker bought Up, or equivalently sold Down).
+        A print only proves ask-side liquidity for the side the AGGRESSOR
+        bought: counting a wave of aggressive Down buying as evidence that
+        an Up FAK would fill doubled the caps with flow that was running
+        the other way. Direction-blind counting inflated cap_tape ~2x.
         """
         tot = 0.0
-        for t_us, px, sz in reversed(self.tape):
+        for rec in reversed(self.tape):
+            t_us, px, sz = rec[0], rec[1], rec[2]
+            buy_up = rec[3] if len(rec) > 3 else None
             if t_us < since_us:
                 break
             if side == "Up":
-                if px <= limit + 1e-9:
+                if px <= limit + 1e-9 and buy_up is not False:
                     tot += sz
-            elif px >= (1.0 - limit) - 1e-9:
+            elif px >= (1.0 - limit) - 1e-9 and buy_up is not True:
                 tot += sz
         return tot
 
@@ -455,13 +490,16 @@ class BotState:
                             rows.append((ts_us, float(p["value"])))
             except OSError:
                 continue
-        rows.sort()
-        seen = set()
+        # MERGE, don't append: this now also runs after a mid-session
+        # reconnect, when the buffer already holds newer live ticks.
+        # Appending older backfill rows behind them would leave the deque
+        # unsorted, and _integral and oracle_age_s both assume time order.
+        merged = {ts: px for ts, px in self.oracle_hist}
         for ts, px in rows:
-            if ts in seen:
-                continue
-            seen.add(ts)
-            self.oracle_hist.append((ts, px))
+            merged.setdefault(ts, px)
+        self.oracle_hist.clear()
+        for ts in sorted(merged):
+            self.oracle_hist.append((ts, merged[ts]))
         return len(self.oracle_hist)
 
     def oracle_sigma_rel(self, lookback_s=3600):
@@ -575,29 +613,43 @@ class BotState:
         the backtest quantity regardless of feed rate.
         """
         if b_us <= a_us:
-            return 0.0, 0.0, 0, False
+            return 0.0, 0.0, 0, False, 0.0
         last_before = None
+        last_before_ts = None
         pts = []
         for ts, px in self.oracle_hist:
             if ts <= a_us:
-                last_before = px
+                last_before, last_before_ts = px, ts
             elif ts < b_us:
                 pts.append((ts, px))
         if last_before is None and not pts:
-            return 0.0, 0.0, 0, False
+            return 0.0, 0.0, 0, False, (b_us - a_us) / 1e6
         covered = last_before is not None
         cur_t = a_us
         cur_px = last_before if last_before is not None else pts[0][1]
         total = 0.0
+        # max_hole: the longest stretch the integral had to HOLD a price
+        # across, measured tick-to-tick (including from the pre-window
+        # tick and to the window end). Callers refuse to trust the result
+        # when this exceeds MAX_HOLE_S -- a held price across a real feed
+        # outage is a fabricated path, not an average.
+        max_hole = 0.0
+        prev_ts = last_before_ts if covered else None
         for ts, px in pts:
+            if prev_ts is not None:
+                max_hole = max(max_hole, ts - prev_ts)
+            prev_ts = ts
             total += cur_px * (ts - cur_t)
             cur_t, cur_px = ts, px
+        if prev_ts is not None:
+            max_hole = max(max_hole, b_us - prev_ts)
         total += cur_px * (b_us - cur_t)
-        return total / 1e6, (b_us - a_us) / 1e6, len(pts), covered
+        return (total / 1e6, (b_us - a_us) / 1e6, len(pts), covered,
+                max_hole / 1e6)
 
     def _avg_over(self, a_us, b_us):
         """Back-compat shim: (price_seconds, seconds) over the interval."""
-        ps, secs, _, _ = self._integral(a_us, b_us)
+        ps, secs, _, _, _ = self._integral(a_us, b_us)
         return ps, secs
 
     def oracle_age_s(self):
@@ -624,7 +676,8 @@ class BotState:
         if m.k_fixed is not None:
             return m.k_fixed
         w_us = int(m.w * 1e6)
-        ps, secs, nticks, covered = self._integral(m.t0_us - w_us, m.t0_us)
+        ps, secs, nticks, covered, hole = self._integral(
+            m.t0_us - w_us, m.t0_us)
         # The average is a TIME-WEIGHTED integral, so it does not need many
         # ticks -- it needs a price in force from the start of the window
         # (`covered`) plus enough updates that it is not one stale quote
@@ -633,17 +686,25 @@ class BotState:
         # ticks/s, so K silently became None and NOTHING in the settle
         # window could be priced -- the bot logged zero signals with no
         # error anywhere.
-        if secs <= 0 or not covered or nticks < 3:
+        if secs <= 0 or not covered or nticks < 3 or hole > MAX_HOLE_S:
             return None
-        if now_us() >= m.t0_us:
+        # Latch only after the oracle's delivery lag has surely passed:
+        # rounds arrive 1.6-2.8s after their stamps, so latching at t0
+        # froze a K missing the strike window's final ticks.
+        if now_us() >= m.t0_us + K_LATCH_GRACE_US:
             m.k_fixed = ps / secs            # window closed: latch it
         return ps / secs
 
-    def settle_sum_so_far(self, m, t_us=None):
-        """(price_seconds, seconds) already accumulated inside [t1-w, t1)."""
+    def _settle_full(self, m, t_us=None):
+        """Full-quality integral over [t1-w, min(t, t1)):
+        (price_seconds, seconds, nticks, covered, max_hole_s)."""
         t_us = t_us or now_us()
         w_us = int(m.w * 1e6)
-        ps, secs, _, _ = self._integral(m.t1_us - w_us, min(t_us, m.t1_us))
+        return self._integral(m.t1_us - w_us, min(t_us, m.t1_us))
+
+    def settle_sum_so_far(self, m, t_us=None):
+        """(price_seconds, seconds) already accumulated inside [t1-w, t1)."""
+        ps, secs, _, _, _ = self._settle_full(m, t_us)
         return ps, secs
 
     # ---- feed handlers -------------------------------------------------
@@ -691,13 +752,17 @@ class BotState:
                 return m
         return None
 
-    def on_trade(self, asset_id, price, ts_ms, size=0.0):
+    def on_trade(self, asset_id, price, ts_ms, size=0.0, buy_up=None):
+        """buy_up: True if the aggressor bought the Up side (an up-token
+        BUY, or the mirrored equivalent: a down-token SELL). None when the
+        feed did not say -- printed() then counts it for both sides, the
+        pre-fix behaviour, rather than silently dropping it."""
         for m in self.markets.values():
             if m.asset_id_up == asset_id:
                 m.last_trade_px = price
                 m.last_trade_us = now_us()
                 if size > 0:
-                    m.tape.append((m.last_trade_us, price, size))
+                    m.tape.append((m.last_trade_us, price, size, buy_up))
                 return
 
     # ---- derived -------------------------------------------------------
@@ -738,7 +803,10 @@ class BotState:
         if srel is None:
             return None                      # implausible vol -> do not price
         sigma = srel * spot                  # dollar vol per sqrt(sec)
-        r_sum, _ = self.settle_sum_so_far(m, t_us)
+        r_sum, _secs, _n, covered, hole = self._settle_full(m, t_us)
+        if t > T - m.w and (not covered or hole > MAX_HOLE_S):
+            return None                      # feed hole inside the settle
+                                             # window: S is fabricated
         R = float(r_sum)                          # price-seconds
         gauss = float(_fair(spot, K, R, T, t, m.w, sigma))
         # Phi(z) is measurably overconfident here (z>3 settles Up 91.6%, not
@@ -772,7 +840,10 @@ class BotState:
             s = max((T - m.w) - t, 0.0)
             sd = sigma * ((s + m.w / 3.0) ** 0.5)
             return (spot - K) / sd if sd > 0 else None
-        r_sum, _ = self.settle_sum_so_far(m, t_us)
+        r_sum, _secs, _n, covered, hole = self._settle_full(m, t_us)
+        if not covered or hole > MAX_HOLE_S:
+            return None                      # feed hole inside the settle
+                                             # window: S is fabricated
         sd = sigma * ((rem ** 3) / 3.0) ** 0.5
         return (r_sum + spot * rem - K * m.w) / sd if sd > 0 else None
 

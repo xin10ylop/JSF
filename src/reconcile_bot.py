@@ -290,6 +290,7 @@ def main():
     bt.state.markets[ml.slug] = ml
     ml.set_book(True, [(0.80, 100.0)], [(0.84, 200.0)])
     from bot.state import now_us as _n
+    ml.book_us = _n()      # the broker refuses fills on a stale book view
 
     def _q(limit, size, due_us):
         bt.pending.append({"slug": ml.slug, "side": "Up", "limit": limit,
@@ -321,10 +322,15 @@ def main():
         bt.n_miss = bt.n_reject = bt.n_partial = 0
         for k in bt.n_miss_why:
             bt.n_miss_why[k] = 0
-        m2 = MarketState("exec-5m", "up", (t1l - 300) * 1_000_000,
-                         t1l * 1_000_000, asset_id_dn="dn")
+        # The market must be INSIDE its settle window: the claim ledger
+        # counts prints from [t1-w, now) only, which is the only region
+        # the strategy can queue orders from anyway.
+        t1e = int(time.time()) + 20
+        m2 = MarketState("exec-5m", "up", (t1e - 300) * 1_000_000,
+                         t1e * 1_000_000, asset_id_dn="dn")
         bt.state.markets["exec-5m"] = m2
         m2.set_book(True, [(0.80, 100.0)], book)
+        m2.book_us = _n()
         for px, sz in tape:
             m2.tape.append((_n(), px, sz))
         bt.fill_cfg = {"participation": 1.0, "vol_participation": 0.25,
@@ -380,6 +386,7 @@ def main():
     m2 = fresh([(0.90, 200.0)], tape=[(0.90, 40.0)], use_tape_cap=True)
     assert take(m2, 0.90, 100)["shares"] == 10.0
     m2.set_book(True, [(0.80, 100.0)], [(0.90, 200.0)])   # venue refresh
+    m2.book_us = _n()
     pos = take(m2, 0.90, 100)
     assert pos["shares"] == 10.0 and bt.n_miss == 1, \
         f"same prints claimed twice across a book refresh: {pos}"

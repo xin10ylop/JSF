@@ -245,10 +245,15 @@ class RollAvgEdge:
         if last is not None and (t_us - last) < self.cooldown_s * 1e6:
             self.f["cooldown"] += 1
             return None
-        if self.last_book.get(m.slug) == m.book_us:
-            self.f["cooldown"] += 1
-            return None                      # same book snapshot; would be
-                                             # a fictional second fill
+        # Same-book-snapshot dedup, PER SIDE and against the clock of the
+        # book the candidate ask actually lives on. Keying both sides on
+        # m.book_us (the Up token's clock) did two wrong things at once:
+        # a Down fire was locked until some unrelated Up-book event
+        # arrived (throttling exactly the one-sided endgame state this
+        # strategy exists to trade), and every Up-book tick re-unlocked
+        # the SAME unchanged resting Down ask for another fictional take.
+        stamp_up = m.book_us
+        stamp_dn = m.book_dn_us if dn_src == "book" else m.book_us
         # The VALIDATED gate is |z| >= zmin and ask <= max_price, nothing
         # more: that is exactly what was measured at +3.04c/share against
         # real prints, avg fill 0.877, hit 0.916.
@@ -286,12 +291,17 @@ class RollAvgEdge:
             return True
 
         if z >= self.zmin and ask_up is not None and _px_ok(ask_up):
+            if self.last_book.get((m.slug, "Up")) == stamp_up:
+                self.f["cooldown"] += 1
+                return None
             ba = ask_up
-            if self.require_edge and fv - ba < self.edge_min:
+            # The edge gate must clear the FEE it will actually pay, or
+            # its floor is ~0.3c while the config says 2c.
+            if self.require_edge and ev_of(fv, ba) < self.edge_min:
                 return None
             self.f["fired"] += 1
             self.last_fire[m.slug] = t_us
-            self.last_book[m.slug] = m.book_us
+            self.last_book[(m.slug, "Up")] = stamp_up
             return {"action": "taker_buy", "side": "Up", "px": ba,
                     "avail": bas, "size": self.size,
                     "ev_est": round(ev_of(fv, ba), 4), "z": round(z, 2),
@@ -299,11 +309,14 @@ class RollAvgEdge:
                     "reason": f"rollavg z={z:+.2f} emp_fair {fv:.3f} vs ask "
                               f"{ba:.3f} rem {rem:.0f}s"}
         if z <= -self.zmin and ask_dn is not None and _px_ok(ask_dn):
-            if self.require_edge and (1 - fv) - ask_dn < self.edge_min:
+            if self.last_book.get((m.slug, "Down")) == stamp_dn:
+                self.f["cooldown"] += 1
+                return None
+            if self.require_edge and ev_of(1 - fv, ask_dn) < self.edge_min:
                 return None
             self.f["fired"] += 1
             self.last_fire[m.slug] = t_us
-            self.last_book[m.slug] = m.book_us
+            self.last_book[(m.slug, "Down")] = stamp_dn
             return {"action": "taker_buy", "side": "Down", "px": ask_dn,
                     "avail": dn_sz, "size": self.size,
                     "ev_est": round(ev_of(1 - fv, ask_dn), 4),

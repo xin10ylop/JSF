@@ -108,6 +108,58 @@ class Bot:
         self.started_us = now_us()   # so a health line can be
                                      # attributed to THIS process
         self._seed_day_pnl()
+        self._replay_open_positions()
+
+    def _replay_open_positions(self):
+        """Rebuild positions in STILL-OPEN markets from the fills log.
+
+        A restart used to forget every position: the bot then saw zero
+        shares in a market it already held max size in and could buy the
+        full per-market cap AGAIN -- 2x the stated limit, invisible to
+        every risk check. Fills for markets whose window has ended are
+        left to the scorer; only open markets carry re-fire risk.
+        """
+        path = os.path.join(self.logdir, "paper_fills.jsonl")
+        now_s = time.time()
+        n = 0
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - 8 * 1024 * 1024))
+                chunk = fh.read().decode("utf-8", "replace")
+        except OSError:
+            return
+        lines = chunk.split("\n")
+        for line in (lines[1:] if size > 8 * 1024 * 1024 else lines):
+            if '"taker_fill"' not in line and '"maker_fill"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            if d.get("kind") not in ("taker_fill", "maker_fill"):
+                continue
+            slug = d.get("slug", "")
+            try:
+                t1 = int(slug.rsplit("-", 1)[1]) + \
+                    (300 if "-5m-" in slug else 900)
+            except (ValueError, IndexError):
+                continue
+            if t1 <= now_s:
+                continue
+            sh = float(d.get("shares", 0))
+            px = float(d.get("px", 0))
+            fee = float(d.get("fee_per_sh", 0))
+            pos = self.broker.positions.setdefault(
+                (slug, d.get("side")), {"shares": 0.0, "cost": 0.0})
+            pos["shares"] += sh
+            pos["cost"] += sh * (px + fee)
+            n += 1
+        if n:
+            self.log_decision({"kind": "positions_replayed", "fills": n,
+                               "markets": len({k[0] for k
+                                               in self.broker.positions})})
 
     def _seed_day_pnl(self):
         """Rebuild today's realized P&L from the decision log on startup.
@@ -120,7 +172,7 @@ class Bot:
         """
         path = os.path.join(self.logdir, "decisions.jsonl")
         day_start_us = int(time.time() // 86400) * 86400 * 1_000_000
-        total, outcomes = 0.0, []
+        total, outcomes, last_state = 0.0, [], None
         try:
             with open(path, "rb") as fh:
                 fh.seek(0, 2)
@@ -131,20 +183,25 @@ class Bot:
             return
         lines = chunk.split("\n")
         for line in (lines[1:] if size > 32 * 1024 * 1024 else lines):
-            if '"settled"' not in line:
+            if '"settled"' not in line and '"risk_state"' not in line:
                 continue
             try:
                 d = json.loads(line)
             except Exception:  # noqa: BLE001
                 continue
-            if d.get("kind") != "settled" or d.get("t_us", 0) < day_start_us:
+            if d.get("t_us", 0) < day_start_us:
+                continue
+            if d.get("kind") == "risk_state":
+                last_state = d
+                continue
+            if d.get("kind") != "settled":
                 continue
             pnl = float(d.get("pnl", 0.0))
             total += pnl
             if pnl != 0:
                 outcomes.append(pnl > 0)
-        if outcomes:
-            self.risk.seed(total, outcomes)
+        if outcomes or last_state:
+            self.risk.seed(total, outcomes, logged=last_state)
             self.log_decision({"kind": "day_pnl_seeded",
                                "n_settles": len(outcomes),
                                "day_pnl": round(total, 2),
@@ -152,8 +209,15 @@ class Bot:
 
     def log_decision(self, obj):
         obj["t_us"] = now_us()
-        self.decisions.write(json.dumps(obj, separators=(",", ":")) + "\n")
-        self.decisions.flush()
+        try:
+            self.decisions.write(json.dumps(obj, separators=(",", ":"))
+                                 + "\n")
+            self.decisions.flush()
+        except OSError:
+            # ENOSPC etc. A failed log write must degrade the RECORD, not
+            # kill the process: an unguarded raise here turned a full disk
+            # into a 5s crash loop across all five coins.
+            self.n_log_err = getattr(self, "n_log_err", 0) + 1
 
     # ---- market discovery ---------------------------------------------
     async def discover(self, session):
@@ -190,10 +254,19 @@ class Bot:
                 if not toks:
                     continue
                 ws = t0 + k * step
-                self.state.markets[slug] = MarketState(
+                m_new = MarketState(
                     slug, toks[0], ws * 1_000_000,
                     (ws + step) * 1_000_000,
                     asset_id_dn=toks[1] if len(toks) > 1 else None)
+                # A position replayed from before a restart counts toward
+                # the claim ledger too, or the restarted broker could
+                # re-claim liquidity the pre-restart process already took.
+                for side in ("Up", "Down"):
+                    held = self.broker.positions.get(
+                        (slug, side), {}).get("shares", 0.0)
+                    if held:
+                        m_new.claimed[side] = held
+                self.state.markets[slug] = m_new
                 self.log_decision({"kind": "market_added", "slug": slug})
         # settle + drop expired markets (oracle end price known ~2s after t1)
         drop = []
@@ -209,7 +282,7 @@ class Bot:
             result = self._settle_result(m)
             if result is not None:
                 pnl = self.broker.settle(slug, result)
-                self.risk.on_settle_pnl(pnl)
+                self.on_market_settled(pnl)
                 self.log_decision({"kind": "settled", "slug": slug,
                                    "result": result, "pnl": pnl,
                                    "src": "oracle"})
@@ -232,8 +305,19 @@ class Bot:
         so this reads both averages straight off the oracle ring buffer.
         """
         K = self.state.strike_avg(m)
-        r_ps, r_secs = self.state.settle_sum_so_far(m, m.t1_us)
-        if K is None or r_secs < m.w * 0.9:
+        r_ps, r_secs, nticks, covered, hole = self.state._settle_full(
+            m, m.t1_us)
+        # The old guard (r_secs < 0.9w) could never fire: _integral
+        # returns secs = the full span whenever ANY tick covers the
+        # window start, so a settle window bridging a feed outage was
+        # graded on a held (fabricated) price and fed the loss limit and
+        # streak breaker wrong outcomes. Require real coverage -- enough
+        # ticks, no hole, and the feed alive PAST t1 -- else defer to the
+        # settle loop's authoritative Gamma fallback.
+        newest = self.state.oracle_hist[-1][0] if self.state.oracle_hist \
+            else 0
+        if (K is None or r_secs <= 0 or not covered or nticks < m.w / 3
+                or hole > 5.0 or newest < m.t1_us):
             return None
         return 0 if (r_ps / r_secs) >= K else 1
 
@@ -308,6 +392,20 @@ class Bot:
                                 d = json.loads(msg)
                             except Exception:  # noqa: BLE001
                                 continue
+                            # The round-age watchdog must run on EVERY
+                            # frame, before the symbol filter: if the
+                            # multiplexed stream keeps delivering other
+                            # coins but drops OURS, nothing below this
+                            # line executes for our symbol and the old
+                            # in-filter check waited for the 600s cycle.
+                            if (self.state.oracle_hist
+                                    and self.state.oracle_age_s()
+                                    > MAX_ROUND_AGE_S):
+                                self.log_decision({
+                                    "kind": "rtds_round_stale",
+                                    "age_s": round(
+                                        self.state.oracle_age_s(), 1)})
+                                break
                             pay = d.get("payload", {})
                             if pay.get("symbol") != self.state.oracle_symbol:
                                 continue
@@ -318,13 +416,6 @@ class Bot:
                                 if (m.end_px is None
                                         and ts * 1000 >= m.t1_us):
                                     m.end_px = px
-                            # the socket is live but the ROUND may be stuck
-                            if self.state.oracle_age_s() > MAX_ROUND_AGE_S:
-                                self.log_decision({
-                                    "kind": "rtds_round_stale",
-                                    "age_s": round(
-                                        self.state.oracle_age_s(), 1)})
-                                break
                     finally:
                         pt.cancel()
             except asyncio.TimeoutError:
@@ -335,6 +426,18 @@ class Bot:
                 self.log_decision({"kind": "feed_err", "feed": "rtds",
                                    "err": str(e)[:100]})
                 await asyncio.sleep(2)
+            # Repair the hole this outage just left. The recorder holds an
+            # independent RTDS connection and flushes every tick to
+            # data/live/rtds within seconds; merging its capture converts
+            # a bot-socket outage (the common case -- the two connections
+            # fail independently) into a non-event instead of a window
+            # the hole-guard refuses to price.
+            try:
+                n = self.state.backfill_oracle(lookback_s=180)
+                self.log_decision({"kind": "oracle_backfilled",
+                                   "hist": n})
+            except Exception:  # noqa: BLE001
+                pass
 
     async def clob_feed(self):
         url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -422,9 +525,14 @@ class Bot:
                                 # A dropped price_change leaves the level
                                 # map wrong until the next full snapshot,
                                 # so the bot can price and fill against a
-                                # book that no longer exists. Silence here
-                                # is the worst property it could have.
+                                # book that no longer exists. Break the
+                                # cycle NOW to force a fresh snapshot
+                                # instead of trading a known-desynced
+                                # book for up to 240s.
                                 self.n_clob_drop += 1
+                                self.log_decision(
+                                    {"kind": "clob_drop_resync"})
+                                break
                     finally:
                         pt.cancel()
             except Exception as e:  # noqa: BLE001
@@ -468,9 +576,18 @@ class Bot:
         elif et == "last_trade_price":
             px = float(ev["price"])
             sz = float(ev.get("size", 0))
+            side = ev.get("side")
+            # Aggressor direction in Up-token terms. A down-token BUY is,
+            # mirrored, an aggressive SALE of Up -- the direction flips
+            # with the price. printed() needs this to stop counting
+            # opposite-direction flow as fillable liquidity.
+            buy_up = None
+            if side in ("BUY", "SELL"):
+                buy_up = (side == "BUY") != mirror
             if mirror:
                 px = 1.0 - px
-            self.state.on_trade(up_aid, px, ev.get("timestamp"), sz)
+            self.state.on_trade(up_aid, px, ev.get("timestamp"), sz,
+                                buy_up=buy_up)
             self.broker.on_trade_print(up_aid, px, sz, now_us())
 
     # ---- decision loop -------------------------------------------------
@@ -486,37 +603,67 @@ class Bot:
         async with aiohttp.ClientSession() as session:
             while True:
                 await asyncio.sleep(30)
-                for slug, m in list(self.pending_settle.items()):
-                    result = self._settle_result(m)
-                    src = "oracle"
-                    if result is None and now_us() > m.t1_us + 120_000_000:
-                        result = await self._gamma_result(session, slug)
-                        src = "gamma"
-                    if result is not None:
-                        pnl = self.broker.settle(slug, result)
-                        self.risk.on_settle_pnl(pnl)
-                        self.log_decision({"kind": "settled", "slug": slug,
-                                           "result": result, "pnl": pnl,
-                                           "src": src})
-                        self.pending_settle.pop(slug, None)
-                    elif now_us() > m.t1_us + give_up_s * 1_000_000:
-                        # Free the concurrency slot. An unscored position
-                        # left in broker.positions counts toward
-                        # max_concurrent_markets FOREVER -- four of these
-                        # over a long run and the bot stops trading
-                        # entirely. The fills stay in paper_fills.jsonl,
-                        # and src/score_paper.py scores them independently
-                        # off Gamma, so dropping the in-memory entry loses
-                        # nothing but the stuck slot.
-                        for k in [k for k in self.broker.positions
-                                  if k[0] == slug]:
-                            self.broker.positions.pop(k, None)
-                        self.log_decision({"kind": "settle_FAILED",
-                                           "slug": slug,
-                                           "note": "position unscored here; "
-                                                   "slot freed, scorer will "
-                                                   "still see the fills"})
-                        self.pending_settle.pop(slug, None)
+                try:
+                    await self._settle_pass(session, give_up_s)
+                except Exception as e:  # noqa: BLE001
+                    # One bad pass must not kill the coroutine: main()'s
+                    # gather tears down the whole process on the first
+                    # unhandled exception in any task.
+                    self.log_decision({"kind": "settle_loop_err",
+                                       "err": repr(e)[:200]})
+
+    async def _settle_pass(self, session, give_up_s):
+        for slug, m in list(self.pending_settle.items()):
+            result = self._settle_result(m)
+            src = "oracle"
+            if result is None and now_us() > m.t1_us + 120_000_000:
+                result = await self._gamma_result(session, slug)
+                src = "gamma"
+            if result is not None:
+                pnl = self.broker.settle(slug, result)
+                self.on_market_settled(pnl)
+                self.log_decision({"kind": "settled", "slug": slug,
+                                   "result": result, "pnl": pnl,
+                                   "src": src})
+                self.pending_settle.pop(slug, None)
+            elif now_us() > m.t1_us + give_up_s * 1_000_000:
+                # Free the concurrency slot. An unscored position
+                # left in broker.positions counts toward
+                # max_concurrent_markets FOREVER -- four of these
+                # over a long run and the bot stops trading
+                # entirely. The fills stay in paper_fills.jsonl,
+                # and src/score_paper.py scores them independently
+                # off Gamma, so dropping the in-memory entry loses
+                # nothing but the stuck slot.
+                for k in [k for k in self.broker.positions
+                          if k[0] == slug]:
+                    self.broker.positions.pop(k, None)
+                self.log_decision({"kind": "settle_FAILED",
+                                   "slug": slug,
+                                   "note": "position unscored here; "
+                                           "slot freed, scorer will "
+                                           "still see the fills"})
+                self.pending_settle.pop(slug, None)
+
+    def on_market_settled(self, pnl):
+        """Route one settled market's P&L into risk and LOG any risk-state
+        transition it causes. The transition line is what lets a restart
+        reconstruct a probe-kill or an in-flight cool-off -- day_pnl alone
+        cannot distinguish 'killed by the $400 backstop' from 'killed by a
+        failed probe at -$180', and reconstructing the wrong one lets a
+        deploy resume a confirmed-broken edge.
+        """
+        before = self.risk.state_str()
+        self.risk.on_settle_pnl(pnl)
+        after = self.risk.state_str()
+        if before.split("(")[0] != after.split("(")[0]:
+            self.log_decision({"kind": "risk_state", "state": after,
+                               "day": self.risk.day,
+                               "killed": self.risk.killed,
+                               "halt_until_us": self.risk.halt_until_us,
+                               "probe_left": self.risk.probe_left,
+                               "probe_losses": self.risk.probe_losses_seen,
+                               "day_pnl": round(self.risk.day_pnl, 2)})
 
     async def _gamma_result(self, session, slug):
         """0 if Up won, 1 if Down won, from the venue's settled outcome."""
@@ -542,9 +689,16 @@ class Bot:
             return None
         iu = oc.index("Up") if oc and "Up" in oc else 0
         try:
-            return 0 if float(op[iu]) > 0.5 else 1
+            v = float(op[iu])
         except (TypeError, ValueError):
             return None
+        # A voided/50-50 resolution (the venue's remedy for an oracle
+        # outage) is NEITHER side winning; booking it as a Down win would
+        # feed the loss limit and streak breaker a fictional outcome.
+        # Leave it unsettled here; score_paper books it at 0.50/share.
+        if 0.01 < v < 0.99:
+            return None
+        return 0 if v > 0.5 else 1
 
     async def health_loop(self):
         """Periodic snapshot of every input the pricer needs.
@@ -561,59 +715,67 @@ class Bot:
         while True:
             await asyncio.sleep(5 if first else 30)
             first = False
-            s = self.state
-            mk = {}
-            for slug, m in list(s.markets.items())[:6]:
-                mk[slug] = {
-                    "rem_s": round((m.t1_us - now_us()) / 1e6, 1),
-                    "K": (round(s.strike_avg(m), 2)
-                          if s.strike_avg(m) else None),
-                    "fair": (round(s.fair(m), 4)
-                             if s.fair(m) is not None else None),
-                    "z": (round(s.zscore(m), 2)
-                          if s.zscore(m) is not None else None),
-                    "bid": m.best_bid()[0], "ask": m.best_ask()[0],
-                    "book_age_s": (round((now_us() - m.book_us) / 1e6, 1)
-                                   if m.book_us else None)}
-            self.log_decision({
-                "kind": "health", "markets": len(s.markets),
-                "uptime_s": round((now_us() - self.started_us) / 1e6, 1),
-                "pending_settle": len(self.pending_settle),
-                "pending_orders": len(self.pending), "misses": self.n_miss,
-                "orders_sent": self.n_sent,
-                "venue_rejects": self.n_reject, "partials": self.n_partial,
-                "miss_why": dict(self.n_miss_why),
-                "latency_ms": self.latency_us // 1000,
-                "rejects": dict(self.n_rej),
-                "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
-                "clob_drops": self.n_clob_drop, "resubs": self.n_resub,
-                "evals": self.n_eval, "eval_errs": self.n_eval_err,
-                "signals": self.n_signal, "killed": self.risk.killed,
-                "risk_state": self.risk.state_str(),
-                "halts": self.risk.halts,
-                "funnel": next((st.f for st in self.strategies
-                                if hasattr(st, "f")), None),
-                "coin": self.coin,
-                "day_pnl": round(self.risk.day_pnl, 2),
-                "oracle_hist": len(s.oracle_hist),
-                "oracle_rate": s.oracle_rate(), "basis_n": len(s.basis),
-                # Report the sigma that ACTUALLY enters z, and which
-                # source it came from. The health line used to show only
-                # s.vol.var -- the Binance-fed estimator -- while
-                # sigma_rel() prefers the oracle-derived one. On this host
-                # the Binance figure read 2.5e-06 for btc against a true 1s
-                # sd near 1.3e-05, so the gauge was 5x off and pointed at a
-                # number that was not in play. Sigma sits in the
-                # DENOMINATOR of z; a wrong reading here is the exact shape
-                # of a bug that already cost this project once.
-                "sigma_used": s.sigma_rel(),
-                "sigma_src": ("oracle" if s.oracle_sigma_rel() is not None
-                              else ("binance" if s.vol.ok() else "NONE")),
-                "sigma_binance": (s.vol.var ** 0.5) if s.vol.var else None,
-                "vol_var": s.vol.var, "binance_px": s.binance_px,
-                "oracle_px": s.oracle_px, "spot_adj": s.spot_adj(),
-                "stale": {k: round(v, 1) for k, v in s.staleness().items()},
-                "detail": mk})
+            try:
+                self._health_line()
+            except Exception as e:  # noqa: BLE001
+                self.n_eval_err += 1
+                self.log_decision({"kind": "health_err",
+                                   "err": repr(e)[:200]})
+
+    def _health_line(self):
+        s = self.state
+        mk = {}
+        for slug, m in list(s.markets.items())[:6]:
+            mk[slug] = {
+                "rem_s": round((m.t1_us - now_us()) / 1e6, 1),
+                "K": (round(s.strike_avg(m), 2)
+                      if s.strike_avg(m) else None),
+                "fair": (round(s.fair(m), 4)
+                         if s.fair(m) is not None else None),
+                "z": (round(s.zscore(m), 2)
+                      if s.zscore(m) is not None else None),
+                "bid": m.best_bid()[0], "ask": m.best_ask()[0],
+                "book_age_s": (round((now_us() - m.book_us) / 1e6, 1)
+                               if m.book_us else None)}
+        self.log_decision({
+            "kind": "health", "markets": len(s.markets),
+            "uptime_s": round((now_us() - self.started_us) / 1e6, 1),
+            "pending_settle": len(self.pending_settle),
+            "pending_orders": len(self.pending), "misses": self.n_miss,
+            "orders_sent": self.n_sent,
+            "venue_rejects": self.n_reject, "partials": self.n_partial,
+            "miss_why": dict(self.n_miss_why),
+            "latency_ms": self.latency_us // 1000,
+            "rejects": dict(self.n_rej),
+            "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
+            "clob_drops": self.n_clob_drop, "resubs": self.n_resub,
+            "evals": self.n_eval, "eval_errs": self.n_eval_err,
+            "signals": self.n_signal, "killed": self.risk.killed,
+            "risk_state": self.risk.state_str(),
+            "halts": self.risk.halts,
+            "funnel": next((st.f for st in self.strategies
+                            if hasattr(st, "f")), None),
+            "coin": self.coin,
+            "day_pnl": round(self.risk.day_pnl, 2),
+            "oracle_hist": len(s.oracle_hist),
+            "oracle_rate": s.oracle_rate(), "basis_n": len(s.basis),
+            # Report the sigma that ACTUALLY enters z, and which
+            # source it came from. The health line used to show only
+            # s.vol.var -- the Binance-fed estimator -- while
+            # sigma_rel() prefers the oracle-derived one. On this host
+            # the Binance figure read 2.5e-06 for btc against a true 1s
+            # sd near 1.3e-05, so the gauge was 5x off and pointed at a
+            # number that was not in play. Sigma sits in the
+            # DENOMINATOR of z; a wrong reading here is the exact shape
+            # of a bug that already cost this project once.
+            "sigma_used": s.sigma_rel(),
+            "sigma_src": ("oracle" if s.oracle_sigma_rel() is not None
+                          else ("binance" if s.vol.ok() else "NONE")),
+            "sigma_binance": (s.vol.var ** 0.5) if s.vol.var else None,
+            "vol_var": s.vol.var, "binance_px": s.binance_px,
+            "oracle_px": s.oracle_px, "spot_adj": s.spot_adj(),
+            "stale": {k: round(v, 1) for k, v in s.staleness().items()},
+            "detail": mk})
 
     def _process_pending(self):
         """Execute delayed orders against the book as it is NOW.
@@ -668,6 +830,23 @@ class Bot:
             self.log_decision({"kind": "taker_reject", "slug": o["slug"],
                                "side": o["side"], "limit": o["limit"]})
             return
+        # A fill can only be claimed against a view of the book that is
+        # actually current. The CLOB feed goes deliberately blind for
+        # ~1-2s at every resubscribe cycle and after a queue-full drop;
+        # an order firing inside such a gap would "fill" against asks
+        # that may have been pulled seconds ago -- live, that FAK misses.
+        src_us = m.book_dn_us if (o["side"] == "Down" and m.asks_dn) \
+            else m.book_us
+        if not src_us or (now - src_us) / 1e6 > 1.5:
+            self.n_miss += 1
+            self.n_miss_why["stale_book"] = \
+                self.n_miss_why.get("stale_book", 0) + 1
+            self.log_decision({"kind": "taker_miss", "slug": o["slug"],
+                               "side": o["side"], "limit": o["limit"],
+                               "why": "book_view_stale",
+                               "age_s": round((now - src_us) / 1e6, 2)
+                               if src_us else None})
+            return
         legs_avail = m.depth(o["side"], o["limit"])
         if not legs_avail:
             self.n_miss += 1
@@ -683,15 +862,19 @@ class Bot:
         # last few seconds -- a displayed ask is an offer, a print is proof
         cap_tape = f["vol_participation"] * m.printed(
             o["side"], o["limit"], now - int(f["vol_window_s"] * 1e6))
-        # cap 3: never claim more than our share of what printed over the
-        # market's WHOLE life, minus what we already claimed. consume()
+        # cap 3: never claim more than our share of what printed INSIDE
+        # the settle window, minus what we already claimed. consume()
         # empties a level but the venue's next snapshot restores it (our
         # paper fill never happened out there), and the rolling 5s window
         # in cap 2 lets one print justify a fill again a second later --
-        # so without a lifetime ledger the same displayed liquidity can be
-        # eaten several times per market. This is the binding realism cap.
+        # so without a cumulative ledger the same displayed liquidity can
+        # be eaten several times per market. Windowed to [t1-w, now):
+        # counting the market's WHOLE life let a 15m market's fourteen
+        # pre-window minutes of flow certify claims made in its last 60s,
+        # a ~5x dilution of the cap this exists to be.
+        win_start_us = m.t1_us - int(m.w * 1e6)
         cap_life = (f["vol_participation"]
-                    * m.printed(o["side"], o["limit"], 0)
+                    * m.printed(o["side"], o["limit"], win_start_us)
                     - m.claimed[o["side"]])
         want = min(budget, cap_book, cap_tape, cap_life) \
             if f["use_tape_cap"] else min(budget, cap_book)

@@ -143,15 +143,41 @@ class Risk:
         if self.day_pnl < -abs(self.daily_loss_limit):
             self.killed = True
 
-    def seed(self, day_pnl, outcomes):
+    def seed(self, day_pnl, outcomes, logged=None):
         """Restart persistence: today's realized P&L and settle outcomes
-        (list of won bools, oldest first), rebuilt from the decision log."""
+        (won bools, oldest first) rebuilt from the decision log, plus the
+        LAST logged risk-state transition if one exists.
+
+        The transition line is authoritative when present: day_pnl alone
+        cannot distinguish a probe-kill at -$180 from a healthy -$180 day,
+        and re-inferring the streak from the day's outcomes re-armed a
+        fresh full cool-off hours after the original had been served.
+        Without a transition line (first deploy, rotated log) fall back to
+        conservative inference from the outcomes.
+        """
         self._roll_day()
         self.day_pnl = day_pnl
         for w in outcomes[-self.recent.maxlen:]:
             self.recent.append(bool(w))
         if self.day_pnl < -abs(self.daily_loss_limit):
             self.killed = True
+        if logged is not None and logged.get("day") == self.day:
+            self.killed = self.killed or bool(logged.get("killed"))
+            hu = int(logged.get("halt_until_us") or 0)
+            if self.killed:
+                return
+            if hu > _now_us():
+                self.halt_until_us = hu          # honor the ORIGINAL clock
+                self.halts += 1
+            elif hu:
+                # the cool-off elapsed while we were down: probe now
+                self.probe_left = self.probe_markets
+                self.probe_losses_seen = 0
+            else:
+                self.probe_left = int(logged.get("probe_left") or 0)
+                self.probe_losses_seen = int(logged.get("probe_losses")
+                                             or 0)
+            return
         recent = list(self.recent)[-self.streak_n:]
         if (len(recent) >= self.streak_n
                 and sum(1 for w in recent if not w) >= self.streak_losses
