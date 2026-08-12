@@ -542,10 +542,12 @@ comparator, not the bot, is where the next measurement belongs.
 
 Live `(0.5,0.7]` at hit 1.000 on 84 fills. The refutation showed the null
 it was tested against is contaminated, but did not produce a clean null
-that makes it ordinary. That, and the Binance-vs-Chainlink signal gap, are
-the two open questions.
+that makes it ordinary. That, and the Binance-vs-Chainlink signal gap, were
+the two open questions when this was written; the signal gap is now
+quantified in 9.6 and the bucket anomaly has since softened (0.95 on a
+larger sample) but remains above its tape (0.78).
 
-## 9.5 The "Binance is a noisy proxy" explanation: first evidence is against it
+## 9.5 The "Binance is a noisy proxy" explanation: first evidence is against it — SUPERSEDED BY 9.6
 
 I offered the Binance-vs-Chainlink gap as the leading innocent explanation
 for live beating the tape ~3x. `src/oracle_vs_binance.py` tests it directly:
@@ -579,3 +581,76 @@ candidates that remain:
 The recorder began capturing all five coins' oracle ticks continuously on
 2026-08-11, so re-running this in a day gives hundreds of paired markets
 instead of fifteen. That is the cheapest way to close it.
+
+**Correction (2026-08-12):** the re-run happened and points the other way.
+The n=15 slice was exactly as unrepresentative as feared, and the |z|>=2
+argument above was wrong in an instructive way: the strategy's z is
+computed at the DECISION instant from a partial settlement window, while
+the disagreements are decided by what the oracle does in the seconds after
+the fill. A market can look like a |z|=3 lock on Binance and still settle
+the other way on Chainlink. See 9.6.
+
+## 9.6 The re-run at n~139/coin: the proxy handicap is real, and it is the right size
+
+`src/oracle_vs_binance.py` (made self-sufficient: outcomes from Gamma,
+klines from the Binance public mirror, oracle ticks from the droplet's
+continuous RTDS capture), ~139 paired post-change 5m markets per coin:
+
+| coin | Chainlink agrees w/ venue | Binance agrees | disagree % | Chainlink right on disagreements |
+|---|---|---|---|---|
+| btc  | 0.9928 | 0.9565 | 5.1% | 0.857 |
+| eth  | 0.9928 | 0.9640 | 2.9% | 1.000 |
+| sol  | 1.0000 | 0.9640 | 3.6% | 1.000 |
+| xrp  | 1.0000 | 0.9856 | 1.4% | 1.000 |
+| doge | 1.0000 | 0.9928 | 0.7% | 1.000 |
+
+The Chainlink-derived rule reproduces the venue essentially perfectly —
+which is one more independent confirmation of the contract reading — and
+the Binance-derived rule mis-signs 0.7–5.1% of markets depending on coin.
+
+**Sizing the drag.** When the tape's Binance-z buys the side that the
+venue settles against, the backtest books roughly a full loss where the
+live bot (pricing off the real oracle) would not have fired or would have
+bought the winner — close to a 1.00/share swing per mis-signed market. At
+the measured mean mis-sign rate (~2.7% weighted across coins) that is a
+**~2.74c/share drag on the tape**:
+
+```
+coin   disagree%    live    tape     gap
+btc          5.1    7.38    1.80   +5.58
+eth          2.9    2.71    1.79   +0.92
+sol          3.6    1.47    0.96   +0.51
+xrp          1.4    0.52    1.55   -1.03
+doge         0.7    3.92    3.07   +0.85
+
+pearson(disagree, gap)  = +0.769
+spearman(disagree, gap) = +0.500
+
+mean tape 1.83c + mean drag 2.74c = 4.57c   vs live aggregate 4.55c
+```
+
+The corrected tape (~1.8c/share) plus the measured drag lands within
+0.02c of the live figure. The live-vs-tape gap is no longer unexplained:
+**the tape is a floor because it prices off the wrong series, and the
+size of the handicap matches the size of the gap.**
+
+**What does NOT fit, stated plainly:**
+
+1. **XRP is inverted.** Second-lowest disagreement rate (1.4%) yet the
+   only coin running BELOW its tape (-1.03c). Either XRP's live sample is
+   still small enough for this to be noise, or something coin-specific
+   (thinner books, worse fills) eats its edge. Watch, don't explain away.
+2. **The rank correlation is only +0.500 on five points.** Pearson +0.769
+   is carried substantially by btc being extreme on both axes. Five coins
+   is five data points; this is consistent with the story, not proof.
+3. The 0.02c agreement of the aggregate is partly luck — the per-coin
+   residuals (+2.8, -1.9, -1.5, -2.6, -1.9 after subtracting a uniform
+   drag) do not vanish individually.
+
+**The definitive test** is now possible and cheap: rebuild the tape edge
+with **Chainlink-derived z** on the same markets the tape already scores.
+The droplet has continuous five-coin oracle capture plus free trade tapes
+(`src/fetch_pm_free.py`). If the Chainlink-z tape converges to the live
+c/share per coin, the gap is closed mechanically, not by correlation on
+five points. Until then the operating position is: live figures are the
+measurement, tape figures are a floor with a now-quantified handicap.
