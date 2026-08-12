@@ -100,6 +100,8 @@ class Bot:
         self.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0}
         self.n_clob = 0        # counters surfaced in the health log so a
         self.n_clob_err = 0    # silently-stalled feed is visible at a glance
+        self.n_clob_drop = 0   # queue-full drops: book desync until resync
+        self.n_resub = 0       # subscription cycles == book resyncs
         self.n_eval_err = 0
         self.n_eval = 0
         self.n_signal = 0
@@ -354,14 +356,33 @@ class Bot:
                             await asyncio.sleep(10)
                             await ws.send("PING")
                     pt = asyncio.create_task(pinger())
+                    self.n_resub += 1
+                    subbed = set(ids)
                     t_end = time.time() + 240
                     try:
                         while time.time() < t_end:
+                            # A market discovered mid-cycle was waiting up
+                            # to 240s for its first book. A 5m market only
+                            # lives 300s, so that could cost most of its
+                            # tradable life. Break out and resubscribe as
+                            # soon as the set changes.
+                            live = set()
+                            for _m in self.state.markets.values():
+                                live.add(_m.asset_id_up)
+                                if _m.asset_id_dn:
+                                    live.add(_m.asset_id_dn)
+                            if live - subbed:
+                                break
                             msg = await asyncio.wait_for(ws.recv(), timeout=30)
                             try:
                                 queue.put_nowait(msg)
                             except asyncio.QueueFull:
-                                pass
+                                # A dropped price_change leaves the level
+                                # map wrong until the next full snapshot,
+                                # so the bot can price and fill against a
+                                # book that no longer exists. Silence here
+                                # is the worst property it could have.
+                                self.n_clob_drop += 1
                     finally:
                         pt.cancel()
             except Exception as e:  # noqa: BLE001
@@ -510,6 +531,7 @@ class Bot:
                 "latency_ms": self.latency_us // 1000,
                 "rejects": dict(self.n_rej),
                 "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
+                "clob_drops": self.n_clob_drop, "resubs": self.n_resub,
                 "evals": self.n_eval, "eval_errs": self.n_eval_err,
                 "signals": self.n_signal, "killed": self.risk.killed,
                 "funnel": next((st.f for st in self.strategies

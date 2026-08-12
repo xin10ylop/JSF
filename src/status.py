@@ -194,8 +194,14 @@ def show(d):
         print(f"  !! WARM-UP: bot up only {up:.0f}s. The oracle buffer needs "
               f"~10 min to reach back far enough to price a market that is "
               f"REACHING expiry. Counters are not yet meaningful.")
+    dr, rs = d.get("clob_drops"), d.get("resubs")
     print(f"  feed      clob_evs={d.get('clob_evs'):,} "
-          f"errs={d.get('clob_errs')}  consumer alive={d.get('clob_errs') == 0}")
+          f"errs={d.get('clob_errs')}  consumer alive={d.get('clob_errs') == 0}"
+          + (f"  drops={dr} resyncs={rs}" if dr is not None else ""))
+    if dr:
+        print(f"            !! {dr} message(s) DROPPED on a full queue. Each "
+              f"one leaves the level map wrong until the next full snapshot, "
+              f"so the bot can price against a book that no longer exists.")
     rate = d.get("oracle_rate")
     st_ = d.get("stale") or {}
     warn = "  << STALE, z is not trustworthy" if (rate is not None
