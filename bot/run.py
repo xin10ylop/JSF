@@ -107,6 +107,47 @@ class Bot:
         self.n_signal = 0
         self.started_us = now_us()   # so a health line can be
                                      # attributed to THIS process
+        self._seed_day_pnl()
+
+    def _seed_day_pnl(self):
+        """Rebuild today's realized P&L from the decision log on startup.
+
+        Risk state lived only in memory, so a restart zeroed day_pnl and
+        CLEARED the kill switch -- a bot that tripped its daily loss limit
+        would resume trading the moment it was restarted, which live means
+        the one safety rail against a broken edge can be undone by a
+        deploy. Settle lines are already on disk; re-sum today's.
+        """
+        path = os.path.join(self.logdir, "decisions.jsonl")
+        day_start_us = int(time.time() // 86400) * 86400 * 1_000_000
+        total, n = 0.0, 0
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - 32 * 1024 * 1024))
+                chunk = fh.read().decode("utf-8", "replace")
+        except OSError:
+            return
+        lines = chunk.split("\n")
+        for line in (lines[1:] if size > 32 * 1024 * 1024 else lines):
+            if '"settled"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:  # noqa: BLE001
+                continue
+            if d.get("kind") != "settled" or d.get("t_us", 0) < day_start_us:
+                continue
+            total += float(d.get("pnl", 0.0))
+            n += 1
+        if n:
+            self.risk.day_pnl = total
+            if total < -abs(self.risk.daily_loss_limit):
+                self.risk.killed = True
+            self.log_decision({"kind": "day_pnl_seeded", "n_settles": n,
+                               "day_pnl": round(total, 2),
+                               "killed": self.risk.killed})
 
     def log_decision(self, obj):
         obj["t_us"] = now_us()
