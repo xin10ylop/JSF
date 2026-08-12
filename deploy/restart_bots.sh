@@ -19,7 +19,11 @@ done | tr '\n' ' ')
 
 # shellcheck disable=SC2086
 systemctl restart $UNITS
-sleep 3
+# The health loop emits its first line at +5s. Returning before that lets
+# the caller's status.py read the DEAD process's last health line and
+# report tens of thousands of seconds of uptime right after a restart that
+# demonstrably worked.
+sleep 9
 
 fail=0
 for u in $UNITS; do

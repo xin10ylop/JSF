@@ -227,8 +227,12 @@ def show(d):
         # Harmless while the good one is preferred, and a live fault the
         # moment it is not.
         if sb and (sb / su > 3 or su / sb > 3):
-            line += (f"   [binance reads {sb:.2e}, {sb/su:.1f}x apart "
-                     f"-- that feed is degraded]")
+            # Always report the ratio as "N x apart" with N >= 1. Dividing
+            # the small by the large printed "0.0x apart" for a 58x gap,
+            # which reads like agreement.
+            r = max(sb / su, su / sb)
+            line += (f"   [binance reads {sb:.2e}, {r:.0f}x apart "
+                     f"-- that estimator is broken, see OnlineVol.update]")
         print(line)
     else:
         print("  vol       !! sigma_rel() returned None -- BOTH estimators "
