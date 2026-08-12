@@ -42,6 +42,10 @@ def pnl_by_bot():
     d = pd.DataFrame(rows)
     sc = d[d.status == "scored"]
     un = d[d.status == "unresolved"]
+    ff = d[d.status == "fetch_failed"]
+    if len(ff):
+        print(f"  !! {len(ff)} fill(s) excluded: outcome fetch failed after "
+              f"retries (not 'still open' -- re-run status to include them)")
     if not len(sc):
         print(f"  {len(un)} fill(s) taken, none settled yet — the venue "
               f"resolves a market ~1 min after it closes")

@@ -55,6 +55,10 @@ def main():
     path = {s_: base + steps[i] for i, s_ in enumerate(secs)}
     st.vol.force_var((3.0 / base) ** 2)          # 3 dollars per sqrt(sec)
     st.oracle_sigma_rel = lambda *a, **k: None   # force Binance fallback
+    # The fallback now refuses to run without a trusted oracle reference
+    # (cold-start guard), so the harness must supply one, exactly as a
+    # warmed-up live process would have.
+    st._last_good_sigma = 3.0 / base
     st.binance_px = None
     m = MarketState("recon-5m", "tok_up", t0 * 1_000_000, t1 * 1_000_000,
                     asset_id_dn="tok_dn")
@@ -151,6 +155,7 @@ def main():
         st2.oracle_hist.clear()
         st2.vol.force_var((3.0 / base) ** 2)
         st2.oracle_sigma_rel = lambda *a, **k: None
+        st2._last_good_sigma = 3.0 / base
         st2.basis.clear()
         m2 = MarketState("recon-rate", "tok_up", t0 * 1_000_000,
                          t1 * 1_000_000, asset_id_dn="tok_dn")
@@ -211,6 +216,7 @@ def main():
     sb.oracle_hist.clear()
     sb.vol.force_var((3.0 / base) ** 2)
     sb.oracle_sigma_rel = lambda *a, **k: None
+    sb._last_good_sigma = 3.0 / base
     sb.basis.extend([1.0] * 600)
     for u in range(t0b - 40, t1b):
         sb.on_oracle(65000.0 if u < t1b - 30 else 64900.0, u * 1000)
@@ -367,6 +373,57 @@ def main():
     assert take(m2, 0.90, 100)["shares"] == 0.0 and bt.n_miss == 1, \
         "filled against depth that never traded"
     print("PASS: fills are capped by realised prints, not displayed offers")
+
+    # LIFETIME cap: the venue restores the book (our paper fill never
+    # happened out there), but the same 40 printed shares must not justify
+    # a second 10-share claim -- one print, one 25% share, ever.
+    m2 = fresh([(0.90, 200.0)], tape=[(0.90, 40.0)], use_tape_cap=True)
+    assert take(m2, 0.90, 100)["shares"] == 10.0
+    m2.set_book(True, [(0.80, 100.0)], [(0.90, 200.0)])   # venue refresh
+    pos = take(m2, 0.90, 100)
+    assert pos["shares"] == 10.0 and bt.n_miss == 1, \
+        f"same prints claimed twice across a book refresh: {pos}"
+    print("PASS: a book refresh cannot resurrect liquidity we already took")
+
+    # killed bot must also drop orders already inside the latency window
+    m2 = fresh([(0.90, 200.0)], tape=[(0.90, 400.0)], use_tape_cap=True)
+    bt.risk.killed = True
+    pos = take(m2, 0.90, 100)
+    assert pos["shares"] == 0.0 and not bt.pending, \
+        "kill switch let a queued order execute"
+    bt.risk.killed = False
+    assert take(m2, 0.90, 100)["shares"] > 0, "un-kill did not restore"
+    print("PASS: the kill switch flushes the pending queue too")
+
+    # opposite-side guard must see PENDING orders, not just filled ones:
+    # z can flip sign inside the latency window and buying both sides pays
+    # ~1.9 for a 1.0 payoff.
+    class _OppStub:
+        def evaluate(self, state, m, t_us):
+            return {"action": "taker_buy", "side": "Down", "px": 0.90,
+                    "avail": 100.0, "size": 100, "reason": "rollavg stub"}
+    mo = MarketState("opp-5m", "up", (t1l - 300) * 1_000_000,
+                     t1l * 1_000_000, asset_id_dn="dn")
+    bt.state.markets[mo.slug] = mo
+    mo.set_book(True, [(0.85, 100.0)], [(0.90, 200.0)])
+    mo.book_us = _n()
+    bt.state.oracle_us = _n()
+    bt.state.binance_us = _n()
+    bt.strategies = [_OppStub()]
+    bt.n_eval = bt.n_signal = bt.n_eval_err = 0
+    bt.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0}
+    bt.latency_us = 5_000_000
+    bt.pending = [{"slug": mo.slug, "side": "Up", "limit": 0.90,
+                   "size": 50, "fire_us": _n() + 4_000_000, "meta": {}}]
+    bt._try_market_inner(mo)
+    assert all(o["side"] == "Up" for o in bt.pending), \
+        "queued Down while an Up order was still pending"
+    bt.pending = []
+    bt._try_market_inner(mo)
+    assert any(o["side"] == "Down" for o in bt.pending), \
+        "guard now blocks even with nothing pending"
+    bt.pending = []
+    print("PASS: opposite-side guard covers orders still in flight")
 
     # below the venue's own orderMinSize=5 we cannot send an order at all
     m2 = fresh([(0.90, 6.0)], participation=0.5)

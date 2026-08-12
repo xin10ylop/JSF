@@ -21,12 +21,15 @@ class Risk:
         self.stale_binance_s = cfg.get("stale_binance_s", 3.0)
         self.stale_oracle_s = cfg.get("stale_oracle_s", 5.0)
         self.stale_book_s = cfg.get("stale_book_s", 10.0)
-        self.day = time.strftime("%Y-%m-%d")
+        # UTC, explicitly. Markets, logs and the scorer all live in UTC;
+        # localtime here would roll the daily loss limit at whatever
+        # timezone the host happens to be in.
+        self.day = time.strftime("%Y-%m-%d", time.gmtime())
         self.day_pnl = 0.0
         self.killed = False
 
     def on_settle_pnl(self, pnl):
-        d = time.strftime("%Y-%m-%d")
+        d = time.strftime("%Y-%m-%d", time.gmtime())
         if d != self.day:
             # A DAILY loss limit must reset daily. Without clearing `killed`
             # the first bad day stops the bot permanently and, in paper

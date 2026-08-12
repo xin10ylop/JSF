@@ -458,9 +458,22 @@ class Bot:
                                            "src": src})
                         self.pending_settle.pop(slug, None)
                     elif now_us() > m.t1_us + give_up_s * 1_000_000:
+                        # Free the concurrency slot. An unscored position
+                        # left in broker.positions counts toward
+                        # max_concurrent_markets FOREVER -- four of these
+                        # over a long run and the bot stops trading
+                        # entirely. The fills stay in paper_fills.jsonl,
+                        # and src/score_paper.py scores them independently
+                        # off Gamma, so dropping the in-memory entry loses
+                        # nothing but the stuck slot.
+                        for k in [k for k in self.broker.positions
+                                  if k[0] == slug]:
+                            self.broker.positions.pop(k, None)
                         self.log_decision({"kind": "settle_FAILED",
                                            "slug": slug,
-                                           "note": "position left unscored"})
+                                           "note": "position unscored here; "
+                                                   "slot freed, scorer will "
+                                                   "still see the fills"})
                         self.pending_settle.pop(slug, None)
 
     async def _gamma_result(self, session, slug):
@@ -575,6 +588,18 @@ class Bot:
         """
         if not self.pending:
             return
+        if self.risk.killed:
+            # The daily-loss kill switch blocks new SIGNALS via inputs_ok,
+            # but orders already inside the latency window would still land.
+            # A real kill has to stop those too -- live, this is the cancel
+            # the venue's 250ms hold does not allow, so paper must not
+            # grant it either... but a killed bot that keeps executing its
+            # queue for another 400ms after the limit trips is the bigger
+            # lie. Drop them and say so.
+            self.log_decision({"kind": "pending_dropped_killed",
+                               "n": len(self.pending)})
+            self.pending = []
+            return
         now = now_us()
         keep = []
         for o in self.pending:
@@ -610,11 +635,22 @@ class Bot:
         # cap 1: we are one of many takers racing the same quote
         budget = o["size"] * 1.0
         cap_book = sum(sz for _p, sz in legs_avail) * f["participation"]
-        # cap 2: never claim more than the market actually absorbed
+        # cap 2: never claim more than the market actually absorbed in the
+        # last few seconds -- a displayed ask is an offer, a print is proof
         cap_tape = f["vol_participation"] * m.printed(
             o["side"], o["limit"], now - int(f["vol_window_s"] * 1e6))
-        want = min(budget, cap_book, cap_tape) if f["use_tape_cap"] \
-            else min(budget, cap_book)
+        # cap 3: never claim more than our share of what printed over the
+        # market's WHOLE life, minus what we already claimed. consume()
+        # empties a level but the venue's next snapshot restores it (our
+        # paper fill never happened out there), and the rolling 5s window
+        # in cap 2 lets one print justify a fill again a second later --
+        # so without a lifetime ledger the same displayed liquidity can be
+        # eaten several times per market. This is the binding realism cap.
+        cap_life = (f["vol_participation"]
+                    * m.printed(o["side"], o["limit"], 0)
+                    - m.claimed[o["side"]])
+        want = min(budget, cap_book, cap_tape, cap_life) \
+            if f["use_tape_cap"] else min(budget, cap_book)
         if want < f["min_order_size"]:
             self.n_miss += 1
             self.n_miss_why["too_small"] += 1
@@ -622,7 +658,8 @@ class Bot:
                                "side": o["side"], "limit": o["limit"],
                                "why": "below_min_size", "want": round(want, 2),
                                "cap_book": round(cap_book, 1),
-                               "cap_tape": round(cap_tape, 1)})
+                               "cap_tape": round(cap_tape, 1),
+                               "cap_life": round(cap_life, 1)})
             return
         legs = []
         left = want
@@ -651,6 +688,7 @@ class Bot:
         # millisecond must not find it again.
         for p, s in legs:
             m.consume(o["side"], p, s)
+        m.claimed[o["side"]] += got
 
     def _maybe_eval(self, m):
         """Evaluate immediately if this market is inside its settle window."""
@@ -705,7 +743,16 @@ class Bot:
             # else would stop the bot buying Up at ~0.9 and then Down at
             # ~0.9 -- paying ~1.90 for a guaranteed 1.00 payoff.
             other = "Down" if sig["side"] == "Up" else "Up"
-            if self.broker.positions.get((m.slug, other), {}).get("shares", 0) > 0:
+            # Pending orders are exposure too: z can flip sign inside the
+            # ~400ms latency window (late in the window sd collapses, so a
+            # $5-10 spot move swings z across both gates), and an Up order
+            # still in the queue is invisible to broker.positions. Checking
+            # only settled positions let the bot queue Up AND Down in the
+            # same market and pay ~1.9 for a 1.0 payoff.
+            if (self.broker.positions.get((m.slug, other),
+                                          {}).get("shares", 0) > 0
+                    or any(o["slug"] == m.slug and o["side"] == other
+                           for o in self.pending)):
                 self.log_decision({"kind": "blocked_opposite_side",
                                    "slug": m.slug, "side": sig["side"],
                                    "holding": other})

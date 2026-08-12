@@ -16,6 +16,7 @@ import argparse
 import glob
 import json
 import os
+import time
 from collections import defaultdict
 
 import pandas as pd
@@ -27,31 +28,47 @@ UA = {"User-Agent": "Mozilla/5.0"}
 
 
 def outcomes_for(slugs, session):
-    """slug -> True if Up won, via the venue's settled outcomePrices."""
+    """(slug -> True if Up won, set of slugs whose fetch FAILED).
+
+    A failed chunk used to be swallowed by `continue`, and its 100 slugs
+    were then reported as "markets still open" -- a fetch outage silently
+    excluded a contiguous block of fills from the record. Failures are
+    retried, and whatever still fails is returned separately so the report
+    can say "fetch failed", which is actionable, instead of "still open",
+    which is false.
+    """
     out = {}
+    failed = set()
     slugs = sorted(set(slugs))
     for i in range(0, len(slugs), 100):
         chunk = slugs[i:i + 100]
         params = [("slug", s) for s in chunk]
         params += [("closed", "true"), ("limit", "500")]
-        try:
-            r = session.get(GAMMA, params=params, timeout=45)
-            if r.status_code != 200:
-                continue
-            for m in r.json():
-                op = m.get("outcomePrices")
-                oc = m.get("outcomes")
-                if isinstance(op, str):
-                    op = json.loads(op)
-                if isinstance(oc, str):
-                    oc = json.loads(oc)
-                if not op:
+        got = False
+        for attempt in range(3):
+            try:
+                r = session.get(GAMMA, params=params, timeout=45)
+                if r.status_code != 200:
+                    time.sleep(1.0 + attempt)
                     continue
-                iu = oc.index("Up") if oc and "Up" in oc else 0
-                out[m["slug"]] = float(op[iu]) > 0.5
-        except Exception:  # noqa: BLE001
-            continue
-    return out
+                for m in r.json():
+                    op = m.get("outcomePrices")
+                    oc = m.get("outcomes")
+                    if isinstance(op, str):
+                        op = json.loads(op)
+                    if isinstance(oc, str):
+                        oc = json.loads(oc)
+                    if not op:
+                        continue
+                    iu = oc.index("Up") if oc and "Up" in oc else 0
+                    out[m["slug"]] = float(op[iu]) > 0.5
+                got = True
+                break
+            except Exception:  # noqa: BLE001
+                time.sleep(1.0 + attempt)
+        if not got:
+            failed.update(chunk)
+    return out, failed
 
 
 def parser():
@@ -155,7 +172,7 @@ def score_rows(fills):
     """
     s = requests.Session()
     s.headers.update(UA)
-    res = outcomes_for([f["slug"] for f in fills], s)
+    res, failed = outcomes_for([f["slug"] for f in fills], s)
     rows = []
     for f in fills:
         up_won = res.get(f["slug"])
@@ -165,7 +182,9 @@ def score_rows(fills):
                          "px": float(f["px"]), "shares": float(f["shares"]),
                          "seen_px": None, "slip": None, "fee": 0.0,
                          "won": False, "pnl": 0.0, "reason": "",
-                         "t_us": f.get("t_us", 0), "status": "unresolved"})
+                         "t_us": f.get("t_us", 0),
+                         "status": ("fetch_failed" if f["slug"] in failed
+                                    else "unresolved")})
             continue
         won = up_won if f["side"] == "Up" else (not up_won)
         px = float(f["px"])
@@ -202,8 +221,13 @@ def _report(fills, a):
     d = pd.DataFrame(score_rows(fills))
     sc = d[d.status == "scored"]
     un = d[d.status == "unresolved"]
+    ff = d[d.status == "fetch_failed"]
     print(f"fills={len(d)}  scored={len(sc)}  unresolved={len(un)} "
           f"(markets still open)")
+    if len(ff):
+        print(f"  !! {len(ff)} fill(s) in {ff.slug.nunique()} market(s) "
+              f"EXCLUDED because the outcome fetch failed after retries -- "
+              f"re-run to include them; they are NOT still open")
     if not len(sc):
         return
     print(f"\nshares={sc.shares.sum():,.0f}  avg px {(sc.px*sc.shares).sum()/sc.shares.sum():.4f}"

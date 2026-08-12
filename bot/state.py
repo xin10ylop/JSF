@@ -24,6 +24,30 @@ def now_us():
     return int(time.time() * 1_000_000)
 
 
+_PRICING_FNS = None
+
+
+def _pricing_fns():
+    """Import the pricing helpers once, with src/ on the path once.
+
+    fair() used to do `sys.path.insert(0, <src>)` inline on every call --
+    a fresh string appended to sys.path each evaluation, tens of thousands
+    of entries a day per process, i.e. a slow leak in the hottest path.
+    """
+    global _PRICING_FNS
+    if _PRICING_FNS is None:
+        import os as _o
+        import sys as _s
+        src = _o.path.join(_o.path.dirname(_o.path.dirname(
+            _o.path.abspath(__file__))), "src")
+        if src not in _s.path:
+            _s.path.insert(0, src)
+        from rollavg_pricer import fair as _fair
+        from bot.calib import p_up as _p_up
+        _PRICING_FNS = (_fair, _p_up)
+    return _PRICING_FNS
+
+
 # Plausibility band for the 1s log-return sd of a major crypto pair.
 # Measured on BTC 1s klines (2026-08-08..09): sd 1.34e-5, and the rolling
 # 1h sd spans 4.7e-6 (5th pct) to 2.2e-5 (95th). Anything outside this band
@@ -156,7 +180,7 @@ class MarketState:
                  "strike", "bids", "asks", "last_trade_px", "last_trade_us",
                  "book_us", "end_px", "w", "k_fixed", "last_oracle_px",
                  "bids_dn", "asks_dn", "book_dn_us",
-                 "lv_up", "lv_dn", "tape")
+                 "lv_up", "lv_dn", "tape", "claimed")
 
     def __init__(self, slug, asset_id_up, t0_us, t1_us, asset_id_dn=None):
         self.w = 30.0 if (t1_us - t0_us) <= 300_000_000 else 60.0
@@ -193,6 +217,16 @@ class MarketState:
         # at that price. Fills are capped against this, so the bot can never
         # claim more volume than the market really absorbed.
         self.tape = deque(maxlen=400)
+        # Shares the PAPER broker has already claimed here, per side. Our
+        # consume() empties a level, but the venue keeps sending the real
+        # book -- in which our fill never happened -- so the next snapshot
+        # or delta RESTORES the size and the rolling 5s tape window lets
+        # the same print justify a fill again ~1s later. Without a
+        # cumulative ledger the broker can claim the same displayed
+        # liquidity several times per market (up to ~5x with a 5s window
+        # and 1 Hz re-fires). _execute caps lifetime claims against
+        # lifetime prints using this.
+        self.claimed = {"Up": 0.0, "Down": 0.0}
 
     def on_oracle_tick(self, px, round_ts_us):
         self.last_oracle_px = px
@@ -332,6 +366,7 @@ class BotState:
         # market has already elapsed when the market is discovered, so both
         # contract averages are read from here, not accumulated per market.
         self._last_good_sigma = None   # newest trusted oracle-derived vol
+        self._sig_cache = None         # (second, value) memo for the above
         self.oracle_hist = deque(maxlen=4000)   # ~1/s -> >1h of history
         self.backfill_oracle()
         self.seed_vol()
@@ -432,6 +467,12 @@ class BotState:
     def oracle_sigma_rel(self, lookback_s=3600):
         """1s log-return sd of the ORACLE series itself, gap-corrected.
 
+        Memoised per wall-clock second: the value cannot meaningfully move
+        inside one second, and the un-memoised version re-scanned the whole
+        4,000-tick ring buffer on every zscore() AND every fair() call --
+        twice per evaluation, dozens of evaluations per second in a busy
+        window, on a droplet that five of these processes share.
+
         The backtest was self-consistent: path, both window averages and
         sigma all came from Binance 1s klines. The bot is not — it takes
         the two averages from the Chainlink feed (correctly, that is what
@@ -444,12 +485,16 @@ class BotState:
         seconds, and treating a 3-second move as a 1-second return would
         inflate sd by sqrt(3).
         """
+        key = now_us() // 1_000_000
+        if self._sig_cache is not None and self._sig_cache[0] == key:
+            return self._sig_cache[1]
         cutoff = now_us() - lookback_s * 1_000_000
         by_sec = {}
         for ts, px in self.oracle_hist:
             if ts >= cutoff and px > 0:
                 by_sec[ts // 1_000_000] = px
         if len(by_sec) < 300:
+            self._sig_cache = (key, None)
             return None
         rets = []
         for sec, px in by_sec.items():
@@ -457,11 +502,14 @@ class BotState:
             if prev:
                 rets.append(math.log(px / prev))
         if len(rets) < 300:
+            self._sig_cache = (key, None)
             return None
         m = sum(rets) / len(rets)
         var = sum((r - m) ** 2 for r in rets) / (len(rets) - 1)
         sd = math.sqrt(var)
-        return sd if VOL_SD_MIN <= sd <= VOL_SD_MAX else None
+        out = sd if VOL_SD_MIN <= sd <= VOL_SD_MAX else None
+        self._sig_cache = (key, out)
+        return out
 
     def sigma_rel(self):
         """Relative 1s vol to price z: oracle first, Binance fallback.
@@ -499,7 +547,17 @@ class BotState:
             return None
         b = math.sqrt(self.vol.var)
         ref = getattr(self, "_last_good_sigma", None)
-        if ref is not None and not (ref / 3.0 <= b <= ref * 3.0):
+        if ref is None:
+            # Cold start with no oracle-derived reading yet. The Binance
+            # estimator's pairing bug under-reads busy tapes by up to 5x
+            # (documented above), its seed is correct but live updates
+            # poison it within minutes, and an under-read sigma inflates z
+            # and fires on noise. ~10 minutes of refusing to price while
+            # the oracle window fills costs almost nothing; pricing off an
+            # unverifiable denominator is how this project lost money once
+            # already. No reference, no fallback.
+            return None
+        if not (ref / 3.0 <= b <= ref * 3.0):
             return None
         return b
 
@@ -666,10 +724,7 @@ class BotState:
 
         Strike is backward-looking, so this is valid from t=0 onward.
         """
-        import sys as _s, os as _o
-        _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.dirname(
-            _o.path.abspath(__file__))), "src"))
-        from rollavg_pricer import fair as _fair
+        _fair, _p_up = _pricing_fns()
         t_us = t_us or now_us()
         T = (m.t1_us - m.t0_us) / 1e6
         t = (t_us - m.t0_us) / 1e6
@@ -689,9 +744,8 @@ class BotState:
         # Phi(z) is measurably overconfident here (z>3 settles Up 91.6%, not
         # 99.87%). Report the empirical calibration so edge_min binds on a
         # real number. See bot/calib.py.
-        from bot.calib import p_up
         z = self.zscore(m, t_us)
-        emp = p_up(z)
+        emp = _p_up(z)
         return gauss if emp is None else float(emp)
 
     def zscore(self, m: MarketState, t_us=None):
