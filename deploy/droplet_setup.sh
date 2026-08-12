@@ -17,16 +17,23 @@ BRANCH="${BRANCH:-claude/polymarket-btc-binaries-cy1f9p}"
 DIR=/opt/jsf
 
 apt-get update -y
-apt-get install -y python3 python3-pip git chrony
+apt-get install -y python3 python3-pip git
+# chrony separately and non-fatally: this script runs under set -e, and a
+# clock-daemon hiccup must never abort the deploy half-way -- that leaves
+# OLD unit files installed while the repo advances, the exact silent
+# partial-deploy failure this script exists to prevent.
+apt-get install -y chrony || echo "WARN: chrony install failed; timesyncd stays"
 
 # --- clock: the strategy's gate lives in the last 30s and rem enters z as
 # rem^3, so a couple of seconds of skew systematically misprices every
 # market. chrony steps the clock hard on boot and keeps it within ms after;
 # timesyncd (the Ubuntu default) is fine most days but can drift for hours
 # after a suspend/migration without complaining.
-systemctl enable --now chrony 2>/dev/null || systemctl enable --now chronyd
+systemctl enable --now chrony 2>/dev/null || \
+  systemctl enable --now chronyd 2>/dev/null || \
+  echo "WARN: no chrony service; check timedatectl"
 sleep 2
-chronyc tracking | head -5 || true
+chronyc tracking 2>/dev/null | head -5 || true
 
 if [ ! -d $DIR ]; then
   git clone --branch "$BRANCH" "$REPO_URL" $DIR
