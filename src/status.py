@@ -309,6 +309,12 @@ def show(d):
         cd = f.get("cooldown", 0)
         print(f"  {'(re-entry rejects: ' + format(cd, ',') + ')':<10}"
               f"   <- same book snapshot; not part of the chain above")
+        pr = d.get("price_rej") or {}
+        if any(pr.values()):
+            det = "  ".join(f"{k}={v:,}" for k, v in pr.items() if v)
+            print(f"  (pricing refused: {det})   <- why 'priced' dropped: "
+                  f"K/spot missing, frozen round, implausible sigma, stale "
+                  f"fallback spot, or a feed hole in the settle window")
         diag = []
         if (d.get("oracle_rate") is not None
                 and d["oracle_rate"] < 0.05 and f.get("z_pass", 0)):

@@ -796,6 +796,7 @@ class Bot:
             "day_pnl": round(self.risk.day_pnl, 2),
             "oracle_hist": len(s.oracle_hist),
             "oracle_rate": s.oracle_rate(), "basis_n": len(s.basis),
+            "price_rej": dict(s.n_price_rej),
             # Report the sigma that ACTUALLY enters z, and which
             # source it came from. The health line used to show only
             # s.vol.var -- the Binance-fed estimator -- while

@@ -30,12 +30,21 @@ BANDS = [0.0, 0.3, 0.5, 0.7, 0.85, 0.92, 0.95, 0.98, 1.0]
 
 
 def cluster(x):
-    """Share-weighted c/share and clustered-by-market t for a fill set."""
+    """Share-weighted c/share and clustered-by-market t for a fill set.
+
+    t is capped at +/-99: when every market in a tiny sample wins, the
+    residual variance is ~0 and the raw ratio prints absurdities like
+    1.9e16 -- a number that silly reads as a bug, and IS one, in the
+    display sense. Anything past 99 carries no more information anyway.
+    """
     g = x.groupby("slug").agg(pnl=("pnl", "sum"), sh=("shares", "sum"))
     w = g.sh.sum()
     mu = g.pnl.sum() / w
     se = ((g.pnl - mu * g.sh) ** 2).sum() ** 0.5 / w
-    return mu * 100, (mu / se if se > 0 else float("nan")), len(g)
+    t = mu / se if se > 0 else float("nan")
+    if t == t and abs(t) > 99:
+        t = float("nan") if len(g) < 5 else (99.0 if t > 0 else -99.0)
+    return mu * 100, t, len(g)
 
 
 def main():

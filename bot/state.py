@@ -409,6 +409,12 @@ class BotState:
         # contract averages are read from here, not accumulated per market.
         self._last_good_sigma = None   # newest trusted oracle-derived vol
         self._sig_cache = None         # (second, value) memo for the above
+        # WHY pricing refused. zscore/fair return None for six different
+        # reasons with six different fixes; the strategy funnel can only
+        # see "priced dropped N", which is unactionable. Rendered in the
+        # health line.
+        self.n_price_rej = {"K": 0, "spot": 0, "round_age": 0, "sigma": 0,
+                            "spot_stale": 0, "hole": 0}
         self.oracle_hist = deque(maxlen=4000)   # ~1/s -> >1h of history
         self.backfill_oracle()
         self.seed_vol()
@@ -822,20 +828,30 @@ class BotState:
         t = (t_us - m.t0_us) / 1e6
         K = self.strike_avg(m)
         spot = self.spot_adj()
-        if K is None or spot is None or t < 0 or t >= T:
+        if t < 0 or t >= T:
+            return None
+        if K is None:
+            self.n_price_rej["K"] += 1
+            return None
+        if spot is None:
+            self.n_price_rej["spot"] += 1
             return None
         if self.oracle_age_s() > MAX_ORACLE_AGE_S:
+            self.n_price_rej["round_age"] += 1
             return None                      # frozen oracle -> fake margin
         srel = self.sigma_rel()
         if srel is None:
+            self.n_price_rej["sigma"] += 1
             return None                      # implausible vol -> do not price
         if not self._spot_fresh() and self.oracle_age_s() > SPOT_MAX_AGE_S:
+            self.n_price_rej["spot_stale"] += 1
             return None                      # spot would be a stale round
                                              # at full rem weight
         sigma = srel * spot                  # dollar vol per sqrt(sec)
         r_sum, _secs, _n, covered, hole = self._settle_full(
             m, t_us, tail_px=spot)
         if t > T - m.w and (not covered or hole > MAX_HOLE_S):
+            self.n_price_rej["hole"] += 1
             return None                      # feed hole inside the settle
                                              # window: S is fabricated
         R = float(r_sum)                          # price-seconds
