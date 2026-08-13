@@ -758,3 +758,104 @@ before any capacity scaling, concentrated in doge/sol, with btc/eth
 awaiting strict-model proof -- still clears the bar IF it holds through
 2-3 strict-model days and the hybrid decay rows do not trend to zero.
 That is the go/no-go evidence now accumulating on its own.
+
+# 10. The full pre-launch audit: fleet verdict and the closing record
+
+Six line-by-line reviewers (48 findings), six adversarial verifiers, and
+three researchers on fresh official sources. Every fix applied during
+the audit was independently re-verified in place; every remaining
+CONFIRMED finding is listed here or in the worklist. Raw transcripts:
+reports/audit_fleet_raw/.
+
+## 10.1 What the audit fixed (commits 9fbc1bc..f190f12)
+
+Fill realism: lifetime claim ledger, direction-aware tape caps (were ~2x
+inflated), windowed to the settle window (~5x dilution removed on 15m),
+stale-book fill guard, per-side re-fire gate (Down was both throttled by
+and re-armed by the wrong book's clock). Oracle integrity: hole guards
+(MAX_HOLE_S), strike latch grace for the 1.6-2.8s delivery lag,
+settle-quality guard + Gamma deferral, voided-market deferral,
+backfill-merge on reconnect, watchdog hoisted above the symbol filter.
+Signal quality: the trailing delivery-lag gap of S is priced at current
+spot (one clock for both legs), stale-spot refusal (SPOT_MAX_AGE_S),
+executable-Down = min(real ask, mirrored Up bid). Risk: halt ladder
+(streak breaker -> cool-off -> half-size probe -> day kill), $400
+backstop, state persists across restarts including probe-kills, open
+positions replayed, kill flushes in-flight orders. Ops: guarded loops,
+ENOSPC-safe logging, queue-drop instant resync, chrony, capture
+retention, edgecheck out of the memory slice, hybrid decay monitor
+(the old one had been blind since 08-09). Measurement: gamma-chunk
+retries with honest fetch-failed labels, per-side and per-band clustered
+evidence tools, declared-contract tripwire in discover().
+
+## 10.2 Research verdicts that change the plan
+
+**Venue (all live-probed 2026-08-12):** 250ms hold TRUE (made
+non-cancellable Jun 5, announced on X only); fee 0.07*p*(1-p) taker-only
+TRUE + a **taker-rebate program we never modelled** (3-50% of fees back
+by 30-day weighted volume, crypto weight 2.3 -- at our volumes this is
+worth roughly +0.1 to +0.3c/share); tick 0.01 static (the 0.001-above-
+0.96 story is false today; subscribe to tick_size_change); **BNB, HYPE,
+ZEC live on the same TWAP families** (capacity +~50%; zec 5m uses a 60s
+window -- read twapLookbackSeconds per market, never infer); hourly and
+daily families are Binance-candle contracts, NOT TWAP -- do not touch
+with this strategy; per-signer order rate limiter live in warning mode
+since Jul 24; the changelog does NOT carry crypto-binary rule changes.
+
+**Live API:** py-clob-client is ARCHIVED and non-functional. CTF
+Exchange V2 is live (new exchange addresses, pUSD collateral, EIP-712
+domain v2, signature type 3, changed order struct). The live build must
+use `polymarket-client` (Polymarket/py-sdk, v0.5.0, Python >= 3.11).
+L1 key only for credential derivation; L2 HMAC for every call; use
+derive-api-key on restart.
+
+**Geo -- the biggest launch risk, above the edge itself.** The developer
+docs put NL (and IE/JP/MT) in the frontend-close-only/API-open tier, but
+the Help Center lists NL as fully restricted, the Dutch regulator has an
+active upheld enforcement order that already forced NL IP-blocking once
+(Feb 2026), and the ToS attestation covers being LOCATED in a restricted
+jurisdiction -- with close-only-on-wallet as the enforcement remedy,
+which strands open positions. Polymarket's own builder steer is
+eu-west-1 (Dublin), same tier ambiguity. Additionally, Cloudflare Bot
+Management fronts the CLOB and community reports (unanswered by staff)
+describe 30-50% blocks on server-to-server order POSTs from datacenter
+IPs. CONCLUSION: before any live dollar, get written answers from
+Polymarket support: (a) is the tier-3 API carve-out intentional policy,
+(b) what jurisdiction/KYC do they require for an API trader. Their
+answer to (a) determines whether the live plan has a foundation.
+
+## 10.3 Outstanding worklist (in order)
+
+1. Written Polymarket support confirmation on geo/API access (blocker).
+2. Live executor on polymarket-client/V2 (blocker; the launchgap review
+   is the spec: keys via EnvironmentFile, pUSD funding+allowances,
+   negRisk routing, user-channel fills, ack timeouts, redemption sweep,
+   venue-position reconciliation, stop_all.sh, sticky probe-kill in
+   live mode).
+3. Alerting (ops CONFIRMED): webhook/push on kill, halt, feed death,
+   fill-quality divergence; OnFailure= units.
+4. Scorer follow-ups (accounting, all CONFIRMED): close-boundary
+   clustering (t=+3.40 is an upper bound; cross-coin same-window outcome
+   correlation 0.52-0.65), voided 50/50 booking at 0.50, maker-fill
+   fee/meta, fill_model version stamp + duplicate detection,
+   reset_pnl.sh unit derivation.
+5. Calibration: per-side gate decision from band_report's by-side table;
+   recalibrate calib.py on a drift-balanced sample.
+6. Expansion candidates once strict-model days confirm: bnb/hype/zec
+   (declared-window support already shipped), maker-side variant to
+   harvest the rebate instead of paying the fee, per-band sizing.
+
+## 10.4 The honest launch posture
+
+The strategy is real but smaller than the loose-era record claimed:
+HYBRID-z says ~+1.2c/share, ~$700/day at 200-share caps -- and the
+leakage review shows even that is slightly optimistic against what live
+can reach (the benchmark's oracle legs use round-stamp time; live gets
+rounds 1-2.6s late; the lag-decay table prices that at roughly -0.3 to
+-0.8c/share). The strict-model paper days now running are the ground
+truth. Go-live requires: (1) the geo answer in writing, (2) 2-3
+strict-model days at or above ~$400-700/day with the hybrid decay rows
+not trending to zero, (3) the live executor built on V2 with the
+launchgap checklist closed, (4) first live week at minimum size
+(5-10 shares) reconciling live fills against paper assumptions before
+any scaling.
