@@ -824,6 +824,20 @@ Polymarket support: (a) is the tier-3 API carve-out intentional policy,
 (b) what jurisdiction/KYC do they require for an API trader. Their
 answer to (a) determines whether the live plan has a foundation.
 
+**Empirical update (2026-08-13): the NL order path is OPEN.** Differential
+probe of POST clob.polymarket.com/order with no credentials: from a US
+IP it returns 403 "Trading restricted in your region" BEFORE auth; from
+the Amsterdam droplet it returns 401 "missing address header" -- the geo
+layer passed an order-path request through to authentication. Amsterdam
+is therefore GO for shadow and micro-live. The written support
+confirmation is downgraded to a before-scaling requirement: it protects
+the phase where a meaningful balance sits on the platform, and the
+fragility risk it hedges is bounded for this strategy anyway (positions
+live <= 15 minutes; a sudden flip to close-only strands ~nothing).
+Latency note: Polymarket's Dublin steer is AWS-region framing, not
+physics -- AMS-LON ~6-8ms beats DUB-LON ~10-12ms, and DigitalOcean has
+no Dublin region. Amsterdam is the optimal allowed DO location.
+
 ## 10.3 Outstanding worklist (in order)
 
 1. Written Polymarket support confirmation on geo/API access (blocker).
