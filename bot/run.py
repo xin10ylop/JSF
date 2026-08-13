@@ -258,6 +258,43 @@ class Bot:
                     slug, toks[0], ws * 1_000_000,
                     (ws + step) * 1_000_000,
                     asset_id_dn=toks[1] if len(toks) > 1 else None)
+                # The venue declares the settlement window PER MARKET
+                # (cryptoMarketConfig.twapLookbackSeconds), and it is not
+                # uniform: zec 5m uses 60s where every other coin's 5m
+                # uses 30s. Rule changes are announced on X only -- the
+                # official changelog skipped the 2026-08-07 change
+                # entirely -- so the declared config is the ONLY reliable
+                # tripwire. Trust it over our duration-inferred default,
+                # and refuse the market outright if TWAP is off or the
+                # window is unrecognizable: trading a contract we have
+                # not modelled is how this project's founding loss
+                # happened to everyone else.
+                cmc = mk.get("cryptoMarketConfig") or {}
+                if isinstance(cmc, str):
+                    try:
+                        cmc = json.loads(cmc)
+                    except Exception:  # noqa: BLE001
+                        cmc = {}
+                look = cmc.get("twapLookbackSeconds")
+                if cmc and cmc.get("twapEnabled") is False:
+                    self.log_decision({"kind": "contract_mismatch",
+                                       "slug": slug,
+                                       "note": "twapEnabled false; refusing"})
+                    continue
+                if look:
+                    try:
+                        lw = float(look)
+                    except (TypeError, ValueError):
+                        lw = None
+                    if lw and lw != m_new.w:
+                        self.log_decision({"kind": "contract_window",
+                                           "slug": slug,
+                                           "declared_w": lw,
+                                           "assumed_w": m_new.w})
+                        if lw in (30.0, 60.0):
+                            m_new.w = lw
+                        else:
+                            continue    # unmodelled window: do not trade
                 # A position replayed from before a restart counts toward
                 # the claim ledger too, or the restarted broker could
                 # re-claim liquidity the pre-restart process already took.

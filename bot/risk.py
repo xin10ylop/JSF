@@ -54,7 +54,10 @@ class Risk:
         self.max_market_dollars = cfg.get("max_market_dollars", 150.0)
         self.max_concurrent = cfg.get("max_concurrent_markets", 4)
         self.daily_loss_limit = cfg.get("daily_loss_limit", 400.0)
-        self.stale_binance_s = cfg.get("stale_binance_s", 3.0)
+        # stale_binance_s was dead config: loaded here, enforced nowhere
+        # (inputs_ok deliberately dropped the Binance check; the actual
+        # Binance freshness cutoff lives in state.spot_adj/_spot_fresh).
+        # A knob that silently does nothing is worse than no knob.
         self.stale_oracle_s = cfg.get("stale_oracle_s", 5.0)
         self.stale_book_s = cfg.get("stale_book_s", 10.0)
         h = cfg.get("halt", {})

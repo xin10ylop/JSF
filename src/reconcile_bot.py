@@ -28,13 +28,17 @@ FEE = 0.07
 
 
 def offline_z(path, t0, t1, tau, K, sigma):
-    """Exactly the backtest's formula (src/endgame_rollavg.py)."""
+    """The backtest's formula (src/endgame_rollavg.py) with one deliberate
+    live refinement: the trailing elapsed second, for which no oracle
+    round has been DELIVERED yet at the decision instant (rounds arrive
+    1.6-2.8s after their stamps), is priced at current spot rather than
+    at the last held round -- the same clock the future leg uses."""
     rem = t1 - tau
     spot = path[tau]
     if tau <= t1 - W:
         s = max((t1 - W) - tau, 0.0)
         return (spot - K) / (sigma * np.sqrt(s + W / 3.0))
-    S = sum(path[u] for u in range(int(t1 - W), int(tau)))
+    S = sum(path[u] for u in range(int(t1 - W), int(tau) - 1)) + spot
     return (S + rem * spot - W * K) / (sigma * np.sqrt(rem ** 3 / 3.0))
 
 
@@ -210,9 +214,12 @@ def main():
     # evaluations: in the settle window a near-decided market loses the bid
     # on the losing token and quotes 0.001, which is exactly when the OTHER
     # token is worth buying.
+    # Construct FIRST: the kline warm-start takes seconds, and stamping
+    # the window before it would age the synthetic ticks past the 3.5s
+    # stale-spot guard (same flake the main section documents).
+    sb = BotState()
     t1b = int(time.time())
     t0b = t1b - 300
-    sb = BotState()
     sb.oracle_hist.clear()
     sb.vol.force_var((3.0 / base) ** 2)
     sb.oracle_sigma_rel = lambda *a, **k: None

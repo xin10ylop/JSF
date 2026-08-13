@@ -65,6 +65,13 @@ MAX_ORACLE_AGE_S = 20.0
 # fabricates a price path, and both z and the settle grade inherit it.
 MAX_HOLE_S = 5.0
 
+# Refuse to price when the SPOT input would be an oracle round older than
+# this. spot enters z at full remaining-window weight (spot * rem, rem up
+# to 60s), so a ~2s-stale round during a fast move mis-prices the whole
+# future leg -- the one place staleness is amplified rather than averaged.
+# Binance-led spot (the normal path) is sub-second and unaffected.
+SPOT_MAX_AGE_S = 3.5
+
 # Do not latch the strike until this long after t0: Chainlink rounds
 # arrive 1.6-2.8s after their round timestamps (measured p50/p99 on
 # data/live/rtds), so a latch inside that lag freezes a K that is missing
@@ -599,8 +606,20 @@ class BotState:
             return None
         return b
 
-    def _integral(self, a_us, b_us):
+    def _integral(self, a_us, b_us, tail_px=None):
         """Time-weighted integral of the oracle price over [a_us, b_us).
+
+        tail_px: price to use for the FINAL stretch, from the last
+        received round to b_us. Chainlink rounds arrive 1.6-2.8s after
+        their stamps, so at the decision instant the trailing 1-3s of the
+        settle window has no delivered round yet; holding the last (old)
+        round there while the future leg uses fresh spot prices the same
+        seconds off two different clocks. Pricing passes the current spot
+        here; settlement does NOT (the venue's own stream had real values
+        we simply have not received -- fabricating them with spot would
+        grade outcomes off the wrong series). When tail_px is given the
+        tail gap is also excluded from max_hole, since it is filled, not
+        held.
 
         Returns (price_seconds, seconds, n_ticks).
 
@@ -641,9 +660,10 @@ class BotState:
             prev_ts = ts
             total += cur_px * (ts - cur_t)
             cur_t, cur_px = ts, px
-        if prev_ts is not None:
+        if prev_ts is not None and tail_px is None:
             max_hole = max(max_hole, b_us - prev_ts)
-        total += cur_px * (b_us - cur_t)
+        total += (tail_px if tail_px is not None else cur_px) \
+            * (b_us - cur_t)
         return (total / 1e6, (b_us - a_us) / 1e6, len(pts), covered,
                 max_hole / 1e6)
 
@@ -695,12 +715,13 @@ class BotState:
             m.k_fixed = ps / secs            # window closed: latch it
         return ps / secs
 
-    def _settle_full(self, m, t_us=None):
+    def _settle_full(self, m, t_us=None, tail_px=None):
         """Full-quality integral over [t1-w, min(t, t1)):
         (price_seconds, seconds, nticks, covered, max_hole_s)."""
         t_us = t_us or now_us()
         w_us = int(m.w * 1e6)
-        return self._integral(m.t1_us - w_us, min(t_us, m.t1_us))
+        return self._integral(m.t1_us - w_us, min(t_us, m.t1_us),
+                              tail_px=tail_px)
 
     def settle_sum_so_far(self, m, t_us=None):
         """(price_seconds, seconds) already accumulated inside [t1-w, t1)."""
@@ -766,6 +787,12 @@ class BotState:
                 return
 
     # ---- derived -------------------------------------------------------
+    def _spot_fresh(self, max_binance_age_s=3.0):
+        """True when spot_adj would use basis-adjusted Binance (fresh)."""
+        return (self.binance_px is not None
+                and (now_us() - self.binance_us) / 1e6 <= max_binance_age_s
+                and len(self.basis) >= 60)
+
     def spot_adj(self, max_binance_age_s=3.0):
         """Best live estimate of the next oracle print.
 
@@ -802,8 +829,12 @@ class BotState:
         srel = self.sigma_rel()
         if srel is None:
             return None                      # implausible vol -> do not price
+        if not self._spot_fresh() and self.oracle_age_s() > SPOT_MAX_AGE_S:
+            return None                      # spot would be a stale round
+                                             # at full rem weight
         sigma = srel * spot                  # dollar vol per sqrt(sec)
-        r_sum, _secs, _n, covered, hole = self._settle_full(m, t_us)
+        r_sum, _secs, _n, covered, hole = self._settle_full(
+            m, t_us, tail_px=spot)
         if t > T - m.w and (not covered or hole > MAX_HOLE_S):
             return None                      # feed hole inside the settle
                                              # window: S is fabricated
@@ -840,7 +871,11 @@ class BotState:
             s = max((T - m.w) - t, 0.0)
             sd = sigma * ((s + m.w / 3.0) ** 0.5)
             return (spot - K) / sd if sd > 0 else None
-        r_sum, _secs, _n, covered, hole = self._settle_full(m, t_us)
+        if not self._spot_fresh() and self.oracle_age_s() > SPOT_MAX_AGE_S:
+            return None                      # spot would be a stale round
+                                             # at full rem weight
+        r_sum, _secs, _n, covered, hole = self._settle_full(
+            m, t_us, tail_px=spot)
         if not covered or hole > MAX_HOLE_S:
             return None                      # feed hole inside the settle
                                              # window: S is fabricated

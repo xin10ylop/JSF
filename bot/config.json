@@ -9,9 +9,9 @@
     "max_market_dollars": 150.0,
     "max_concurrent_markets": 4,
     "daily_loss_limit": 400.0,
-    "stale_binance_s": 3.0,
     "stale_oracle_s": 5.0,
     "stale_book_s": 10.0,
+    "_staleness_note": "Binance staleness is NOT gated here: the oracle is the settlement source and spot falls back to it. The Binance freshness cutoff (3s) lives in state.spot_adj, and pricing refuses outright when the fallback spot round is >3.5s old (SPOT_MAX_AGE_S) -- spot enters z at full remaining-window weight, the one place staleness amplifies. Aggregate worst case per coin is ~$1,000, not the daily_loss_limit alone: the dollar stop counts SETTLED losses, and 4 concurrent x $150 can still be committed on top of a -$400 settled day.",
     "halt": {
       "streak_n": 20,
       "streak_losses": 6,

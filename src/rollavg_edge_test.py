@@ -1,5 +1,14 @@
 """Did the venue's book re-price the 2026-08-07 settlement change?
 
+DEPRECATION WARNING (audit 2026-08-12, leakage review): the rule tested
+below uses K over [t0, t0+w) -- the abandoned FORWARD-strike reading,
+which scores ~0.89 against the venue -- NOT the verified trailing strike
+mean[t0-w, t0) (0.9503) that the live bot implements. Its "NEW rule"
+column therefore looks like a refutation of the live contract and is
+not. It also lacks the +1 close-time kline re-index every other consumer
+applies. Use src/verify_rule_multicoin.py for the contract; this file is
+kept only because load_1s is imported elsewhere.
+
 On 2026-08-07 Polymarket switched the 5m/15m crypto up/down contracts from
 two instantaneous Chainlink prints to a rolling average:
 
