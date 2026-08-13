@@ -66,11 +66,18 @@ MAX_ORACLE_AGE_S = 20.0
 MAX_HOLE_S = 5.0
 
 # Refuse to price when the SPOT input would be an oracle round older than
-# this. spot enters z at full remaining-window weight (spot * rem, rem up
-# to 60s), so a ~2s-stale round during a fast move mis-prices the whole
-# future leg -- the one place staleness is amplified rather than averaged.
-# Binance-led spot (the normal path) is sub-second and unaffected.
-SPOT_MAX_AGE_S = 3.5
+# this. spot enters z at full remaining-window weight, so a stale round
+# during a fast move mis-prices the whole future leg. TUNED 3.5 -> 8.0
+# with live data: at 3.5s the guard refused 211,852 of btc's 269,754
+# in-window evaluations in 3.6h (the Binance mirror is throttled on the
+# trading host, so the oracle-round fallback with its ROUTINE 1.6-2.8s
+# delivery lag is the operative spot path much of the time) and coverage
+# fell 595 -> 464 markets/day. The paired tape measured what routine-lag
+# spot actually costs: CHAINLINK-z (lagged spot) runs ~1-1.7c/share below
+# HYBRID-z (fresh spot) but stays EV-positive at the current edge -- so
+# refusing those moments loses more than it saves. 8s still blocks the
+# pathological regime well before the 20s round-age and 5s hole guards.
+SPOT_MAX_AGE_S = 8.0
 
 # Do not latch the strike until this long after t0: Chainlink rounds
 # arrive 1.6-2.8s after their round timestamps (measured p50/p99 on
