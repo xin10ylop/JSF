@@ -75,7 +75,7 @@ def main():
         step("L1/L2 auth (credential derivation)", False, repr(e)[:200])
         return
     step("L1/L2 auth (credential derivation)", True,
-         f"wallet {str(cl.wallet())[:10]}...")
+         f"wallet {str(cl.wallet())[:10]}... type={cl.wallet_type()}")
 
     closed = cl.get_closed_only_mode()
     step("account NOT in closed-only mode", not closed, f"closed={closed}")

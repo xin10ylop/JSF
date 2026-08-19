@@ -53,12 +53,21 @@ class LiveExecutor:
     def client(self):
         """SecureClient, created on first use. create() signs one EIP-712
         auth message with the wallet key and derives the L2 credentials
-        (idempotent server-side, safe across restarts)."""
+        (idempotent server-side, safe across restarts).
+
+        POLYMARKET_FUNDER (optional): the Polymarket ACCOUNT address to
+        act for -- set it when the key is an exported website-account
+        ("magic") key, so the bot trades the same balance the website
+        shows, no transfers needed. Left unset, the SDK defaults to the
+        signer's own deposit wallet."""
         if self._client is None:
             from polymarket import SecureClient
-            self._client = SecureClient.create(private_key=_key())
+            k = _key()
+            funder = os.environ.get("POLYMARKET_FUNDER") or None
+            self._client = SecureClient.create(private_key=k, wallet=funder)
             self._emit("client_ready",
                        wallet=str(self._client.wallet()),
+                       wallet_type=str(self._client.wallet_type()),
                        closed_only=bool(self._client.get_closed_only_mode()))
         return self._client
 
