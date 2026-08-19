@@ -84,11 +84,9 @@
   "coins": [
     "btc",
     "eth",
-    "sol",
-    "xrp",
-    "doge"
+    "sol"
   ],
-  "_coins_note": "One bot process per coin (bot/run.py --coin <c>), each with its own oracle buffer, vol estimator and logs/<coin>/ record. Measured on the tape at a 1s decision lag and 200 shares/market: btc +$648, eth +$695, sol +$158, xrp +$424, doge +$371 per day, all five positive under first/uniform/last participation assumptions. btc alone is ~a quarter of the total. ~46 MB RSS per process.",
+  "_coins_note": "One bot process per coin (bot/run.py --coin <c>), each with its own oracle buffer, vol estimator and logs/<coin>/ record. TRIMMED to the live roster 2026-08-19: xrp (excluded, -0.16c/sh strict) and doge (paper-only candidate) were stopped to free CPU on the 1-vCPU host for the live executors -- the box saturated at 9 processes and starved the btc/eth event loops (observed: venue 1013 slow-consumer closes, 55% oracle-stale eval rejections). Their historical logs remain on disk; re-add a coin here and rerun droplet_setup.sh to resume it.",
   "record_book_coins": [
     "btc",
     "eth"
