@@ -131,6 +131,7 @@ class Bot:
                 self._prewarmed = set()     # slugs with warm SDK metadata
                 self._settle_verify = []    # (slug, our_result, due_us)
                 self._day_bal_anchor = None  # (utc_day, balance at start)
+        self._loop = None                    # set in main()
         # Total delay before a taker order can match. `venue_hold_ms` is the
         # venue's own documented 250 ms hold on crypto up/down markets ("the
         # order is held for 250 ms, then validation runs again and the order
@@ -372,7 +373,13 @@ class Bot:
                 drop.append(slug)
         for slug in drop:
             m = self.state.markets.pop(slug)
-            result = self._settle_result(m)
+            # LIVE money is never scored on our own oracle math: it
+            # disagreed with the venue's resolution once on launch day
+            # (same data gap that froze the book), and a mis-scored
+            # settle biases the daily stop optimistic. Live positions
+            # defer to the settle loop's Gamma path -- the venue's own
+            # outcome, ~2 minutes slower and authoritative.
+            result = None if self.mode == "live" else self._settle_result(m)
             if result is not None:
                 pnl = self.broker.settle(slug, result)
                 self.on_market_settled(pnl)
@@ -734,7 +741,8 @@ class Bot:
                 self.log_decision({"kind": "settle_verified",
                                    "slug": slug, "result": res})
         for slug, m in list(self.pending_settle.items()):
-            result = self._settle_result(m)
+            result = None if self.mode == "live" \
+                else self._settle_result(m)
             src = "oracle"
             if result is None and now_us() > m.t1_us + 120_000_000:
                 result = await self._gamma_result(session, slug)
@@ -1198,16 +1206,22 @@ class Bot:
             self.log_decision({"kind": "live_miss", "slug": m.slug,
                                "side": sig["side"], "why": "no_token"})
             return
+        now = now_us()
         if size < self.fill_cfg["min_order_size"]:
             # The venue's orderMinSize is 5 shares; risk room below that
-            # cannot be sent, only logged.
+            # cannot be sent. The market is effectively FULL for this
+            # side, so block re-evaluation briefly too: every book tick
+            # re-fires the same conclusion (observed: 10 identical
+            # below_venue_min logs in 130ms).
             self.n_miss += 1
             self.n_miss_why["too_small"] += 1
-            self.log_decision({"kind": "live_miss", "slug": m.slug,
-                               "side": sig["side"], "why": "below_venue_min",
-                               "size": round(size, 2)})
+            if now >= self._refire_block.get((m.slug, sig["side"]), 0):
+                self.log_decision({"kind": "live_miss", "slug": m.slug,
+                                   "side": sig["side"],
+                                   "why": "below_venue_min",
+                                   "size": round(size, 2)})
+            self._refire_block[(m.slug, sig["side"])] = now + 5_000_000
             return
-        now = now_us()
         if now < self._backoff_until:
             self.n_miss += 1
             self.n_miss_why["blocked"] = \
@@ -1304,17 +1318,17 @@ class Bot:
                 mkt.claimed[o["side"]] += filled
             if st == "partial":
                 self.n_partial += 1
-            if (abs(filled - o["size"]) < 1e-9
-                    and abs(px - o["limit"]) < 1e-9
-                    and r.get("order_id")):
-                # A response echoing the order EXACTLY (full size at
-                # exactly the limit) is the async pipeline's
-                # match-intent signature; the real fill can differ
-                # (seen live: echoed 15 @ 0.99, actual 393 @ ~0.025).
-                # Pull the truth from the venue once it settles.
+            if r.get("order_id"):
+                # EVERY fill gets verified against the venue's trade
+                # records: responses can echo the order instead of the
+                # real fill (seen live: echoed 15 @ 0.99, actual 393 @
+                # ~0.025 -- the async pipeline's match-intent behavior),
+                # and bookings drive the risk engine, so they must match
+                # reality. _fill_truth corrects the open position when
+                # they differ.
                 loop.run_in_executor(None, self._fill_truth,
                                      r.get("order_id"), o["slug"],
-                                     o["side"])
+                                     o["side"], token, px, filled)
         elif st == "killed":
             self.n_miss += 1
             self.n_miss_why["live_killed"] = \
@@ -1452,21 +1466,78 @@ class Bot:
                 log_path=os.path.join(self.logdir, "ops.jsonl"))
         return self._ops_ex.client
 
-    def _fill_truth(self, order_id, slug, side):
-        """Ask the venue what an order REALLY did, ~3s after the echo-
-        shaped response that booked it. Log-only for now: the divergence
-        report and the morning review decide whether bookings need
-        correcting; the point tonight is that the truth is on disk."""
-        time.sleep(3.0)
+    def _fill_truth(self, order_id, slug, side, token, booked_px,
+                    booked_sh):
+        """Verify a booked fill against the venue's own trade records
+        (~4s later, on the ops client), and CORRECT the open position
+        when they differ.
+
+        The order response is not authoritative: under the async commit
+        pipeline it can echo the order (full size at exactly the limit)
+        while the real trades executed at other sizes and prices --
+        observed live as a booked 15 sh @ 0.99 whose actual trades were
+        393 sh @ ~0.025. Bookings feed the risk engine and the daily
+        stop, so they are reconciled to ClobTrade rows (joined on
+        taker_order_id), skipping trades whose status is FAILED."""
+        time.sleep(4.0)
         try:
-            od = self._ops_client().get_order(order_id)
-            self.log_decision({
-                "kind": "fill_truth", "slug": slug, "side": side,
-                "order_id": str(order_id),
-                "truth": {k: str(getattr(od, k)) for k in (
-                    "status", "size_matched", "original_size", "price",
-                    "avg_price", "maker_amount", "taker_amount",
-                    "associate_trades", "outcome") if hasattr(od, k)}})
+            true_sh, true_cost = 0.0, 0.0
+            statuses = []
+            pager = self._ops_client().list_account_trades(
+                token_id=str(token))
+            n_seen = 0
+            for tr in pager:
+                n_seen += 1
+                if n_seen > 100:
+                    break
+                if str(getattr(tr, "taker_order_id", "")) != str(order_id):
+                    continue
+                stt = str(getattr(tr, "status", "")).upper()
+                statuses.append(stt)
+                if "FAIL" in stt:
+                    continue
+                p = float(tr.price)
+                s = float(tr.size)
+                true_sh += s
+                true_cost += s * (p + 0.07 * p * (1 - p))
+            booked_cost = booked_sh * (booked_px
+                                       + 0.07 * booked_px * (1 - booked_px))
+            if not statuses:
+                self.log_decision({"kind": "fill_truth_missing",
+                                   "slug": slug, "side": side,
+                                   "order_id": str(order_id)[:24],
+                                   "note": "no venue trades found for "
+                                           "this order yet"})
+                return
+            d_sh = true_sh - booked_sh
+            d_cost = true_cost - booked_cost
+            if abs(d_sh) < 0.01 and abs(d_cost) < 0.02:
+                self.log_decision({"kind": "fill_truth_ok", "slug": slug,
+                                   "side": side, "sh": round(true_sh, 2)})
+                return
+            # Correct the position on the event loop (the broker is a
+            # loop-owned object); if the market already settled the
+            # position is gone and the mismatch is logged for the
+            # morning reconciliation instead.
+            def _apply():
+                pos = self.broker.positions.get((slug, side))
+                applied = False
+                if pos is not None and pos.get("shares", 0) > 0:
+                    pos["shares"] = max(0.0, pos["shares"] + d_sh)
+                    pos["cost"] = max(0.0, pos["cost"] + d_cost)
+                    applied = True
+                self.log_decision({
+                    "kind": "fill_truth_CORRECTED" if applied
+                            else "fill_truth_MISMATCH_POST_SETTLE",
+                    "slug": slug, "side": side,
+                    "order_id": str(order_id)[:24],
+                    "booked": {"sh": round(booked_sh, 2),
+                               "cost": round(booked_cost, 4)},
+                    "venue": {"sh": round(true_sh, 2),
+                              "cost": round(true_cost, 4),
+                              "statuses": statuses[:6]}})
+            if self._loop is not None:
+                self._loop.call_soon_threadsafe(_apply)
         except Exception as e:  # noqa: BLE001
             self.log_decision({"kind": "fill_truth_err",
                                "order_id": str(order_id)[:24],
@@ -1550,6 +1621,7 @@ class Bot:
                 await asyncio.sleep(15)
 
     async def main(self):
+        self._loop = asyncio.get_running_loop()
         tasks = [self.binance_feed(), self.rtds_feed(),
                  self.clob_feed(), self.decide_loop(),
                  self.discovery_loop(), self.health_loop(),
