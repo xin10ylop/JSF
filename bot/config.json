@@ -87,9 +87,6 @@
     "sol"
   ],
   "_coins_note": "One bot process per coin (bot/run.py --coin <c>), each with its own oracle buffer, vol estimator and logs/<coin>/ record. TRIMMED to the live roster 2026-08-19: xrp (excluded, -0.16c/sh strict) and doge (paper-only candidate) were stopped to free CPU on the 1-vCPU host for the live executors -- the box saturated at 9 processes and starved the btc/eth event loops (observed: venue 1013 slow-consumer closes, 55% oracle-stale eval rejections). Their historical logs remain on disk; re-add a coin here and rerun droplet_setup.sh to resume it.",
-  "record_book_coins": [
-    "btc",
-    "eth"
-  ],
-  "_record_book_coins_note": "Recorder CLOB capture is research data, not a trading input -- each bot runs its own CLOB feed. Raw books ran 3.8 GB/period for btc alone before pruning, so widen this only with disk headroom to spare."
+  "record_book_coins": [],
+  "_record_book_coins_note": "PAUSED 2026-08-19 for live-trading CPU headroom: raw btc book capture alone is ~750 ev/s during bursts on a 1-vCPU host that also runs the live executor, and the fill model it existed to fit is fitted. The recorder's rtds/binance tick capture (which the bots' oracle hole-repair needs) is unaffected. Re-enable (['btc','eth']) plus disk headroom when a fill-model refit is due."
 }

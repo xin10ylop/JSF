@@ -1,6 +1,6 @@
 {
-  "mode": "shadow",
-  "_mode_note": "shadow = paper simulation PLUS a signed-order log of exactly what live would send (no network, no key needed). Flip to \"live\" ONLY after 1-2 days of shadow shows the order log matching the paper fills, then commit the flip so the record shows when real money started. The paper fleet (bot/config.json, logs/<coin>/) keeps running unchanged as the frozen baseline for src/live_vs_paper.py.",
+  "mode": "live",
+  "_mode_note": "LIVE as of 2026-08-19 ~19:20 UTC, btc first (staged: eth, then sol, each after the previous is stable for ~a day). Shadow verified on all three coins: correct token per side vs gamma, exact dollar math, caps respected; btc's clean hour showed 243 signals with zero pricing-integrity rejections. The paper btc bot keeps running as the frozen baseline for src/live_vs_paper.py.",
   "families": {
     "5m": 300,
     "15m": 900
