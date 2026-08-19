@@ -98,11 +98,17 @@ class LiveExecutor:
                 token_id=str(token_id), side=side, amount=amount,
                 max_price=max_price, order_type="FAK")
         except Exception as e:  # noqa: BLE001
-            # An un-crossable FAK RAISES InsufficientLiquidityError rather
-            # than returning a killed order: that is the venue saying
-            # "nothing at your limit", i.e. normal FAK kill semantics.
-            if "InsufficientLiquidity" in repr(e):
-                self._emit("order_killed_no_liquidity", **req)
+            # An un-crossable FAK surfaces as a RAISE, not a killed-order
+            # response, in two shapes: the SDK's InsufficientLiquidityError
+            # (pre-flight book check) and the venue's RequestRejectedError
+            # "no orders found to match with FAK order" (matching engine
+            # found nothing at the limit). Both are normal FAK kill
+            # semantics -- zero dollars spent, not an error.
+            msg = repr(e)
+            if ("InsufficientLiquidity" in msg
+                    or "no orders found to match" in msg
+                    or "no match is found" in msg):
+                self._emit("order_killed_no_liquidity", err=msg[:200], **req)
                 return {"status": "killed", "filled": 0.0,
                         "detail": "no liquidity at limit (FAK kill)"}
             self._emit("order_error", err=repr(e)[:300], **req)
