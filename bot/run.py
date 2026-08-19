@@ -253,6 +253,9 @@ class Bot:
 
     def log_decision(self, obj):
         obj["t_us"] = now_us()
+        if getattr(self, "mode", "paper") != "paper":
+            obj["mode"] = self.mode   # lets reports split shadow-era from
+                                      # live-era lines in the same file
         try:
             self.decisions.write(json.dumps(obj, separators=(",", ":"))
                                  + "\n")
@@ -1239,6 +1242,26 @@ class Bot:
                                "side": o["side"],
                                "detail": (r.get("detail") or "")[:200]})
 
+    async def live_keepalive_loop(self):
+        """Keep the ORDER client's connection hot.
+
+        Signals are minutes apart and Cloudflare closes idle connections
+        well within that, so a cold order pays TCP+TLS+HTTP/2 setup
+        INSIDE the race the venue's 250ms hold already makes tight --
+        pure lost conversion. A tiny authenticated GET every 45s, on the
+        same thread and connection the orders use, means every real
+        order departs on a warm socket.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(45)
+            try:
+                await loop.run_in_executor(
+                    self._order_pool,
+                    lambda: self.executor.client.get_closed_only_mode())
+            except Exception:  # noqa: BLE001
+                pass    # order errors are logged on their own path
+
     async def live_ops_loop(self):
         """Live-mode housekeeping every 5 minutes: redeem resolved
         winnings back into pUSD and log the spendable balance.
@@ -1331,6 +1354,7 @@ class Bot:
                  self.settle_loop()]
         if self.mode == "live":
             tasks.append(self.live_ops_loop())
+            tasks.append(self.live_keepalive_loop())
         await asyncio.gather(*tasks)
 
 

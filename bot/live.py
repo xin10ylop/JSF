@@ -87,25 +87,33 @@ class LiveExecutor:
         In shadow mode the order is built and logged but never sent.
         `outcome` ("Up"/"Down") is log-only, for the divergence report.
         """
-        # The SDK denominates BUY market orders in DOLLARS: amount is the
-        # spend, max_price caps the per-share price. shares*max_price
-        # therefore buys AT LEAST `shares` (more if the book is better,
-        # which is strictly good EV) and can never spend beyond the
-        # dollar figure -- the same quantity risk.max_market_dollars caps.
-        from decimal import Decimal, ROUND_DOWN
-        amount = (Decimal(str(shares)) * Decimal(str(max_price))
-                  ).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        # A FAK-STAMPED LIMIT order at our own seen price, not the SDK's
+        # "market order". place_market_order fetches the venue's REST
+        # order book before every submission to estimate a price -- a
+        # full extra round trip spent INSIDE the race against everyone
+        # else hitting the same vanishing ask, and its derived share
+        # count sometimes violated the venue's decimal caps ("maker max
+        # 2 decimals, taker max 4", one order lost). A limit order signs
+        # OUR price and size directly (deterministic venue-clean
+        # amounts, zero pre-flight requests), and order_type sits
+        # OUTSIDE the EIP-712 signature, so restamping the signed order
+        # GTC->FAK is valid: it crosses at prices <= ours or dies, and
+        # can never rest on the book.
+        sh = int(float(shares) * 100) / 100.0     # venue size: max 2dp
+        px = round(float(max_price), 2)           # tick 0.01, static
         req = {"slug": slug, "token_id": str(token_id)[:16] + "...",
-               "side": side, "outcome": outcome, "shares": float(shares),
-               "amount_usd": float(amount), "max_price": float(max_price)}
+               "side": side, "outcome": outcome, "shares": sh,
+               "amount_usd": round(sh * px, 2), "max_price": px}
         if self.shadow:
             self._emit("shadow_order", **req)
             return {"status": "shadow", "filled": 0.0, "avg_px": None,
                     "order_id": None, "detail": "not sent"}
         try:
-            r = self.client.place_market_order(
-                token_id=str(token_id), side=side, amount=amount,
-                max_price=max_price, order_type="FAK")
+            from dataclasses import replace
+            signed = self.client.create_limit_order(
+                token_id=str(token_id), side=side,
+                price=f"{px:.2f}", size=f"{sh:.2f}")
+            r = self.client.post_order(replace(signed, order_type="FAK"))
         except Exception as e:  # noqa: BLE001
             # An un-crossable FAK surfaces as a RAISE, not a killed-order
             # response, in two shapes: the SDK's InsufficientLiquidityError
@@ -139,7 +147,7 @@ class LiveExecutor:
         # response, so making/taking is a unit-invariant price and only
         # the share count needs the heuristic. Real fills pin it down;
         # the divergence report recalibrates anyway.
-        scale = 1e6 if taking > float(shares) * 1000 else 1.0
+        scale = 1e6 if taking > float(sh) * 1000 else 1.0
         making, taking = making / scale, taking / scale
         filled = taking
         avg_px = round(making / taking, 6) if taking > 0 else None
@@ -147,7 +155,7 @@ class LiveExecutor:
         self._emit("order_result", order_id=oid,
                    status=str(getattr(r, "status", "")),
                    making=making, taking=taking, avg_px=avg_px, **req)
-        status = "filled" if filled >= float(shares) - 1e-9 else (
+        status = "filled" if filled >= float(sh) - 1e-9 else (
             "partial" if filled > 0 else "killed")
         return {"status": status, "filled": filled, "avg_px": avg_px,
                 "order_id": oid, "detail": str(getattr(r, "status", ""))}

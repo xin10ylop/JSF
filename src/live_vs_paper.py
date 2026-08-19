@@ -63,16 +63,24 @@ def fills_of(logdir, since_us):
     return out, live_only
 
 
-def settles_of(logdir, since_us):
+def settles_of(logdir, since_us, only_slugs=None):
+    """only_slugs: restrict to these markets -- the live instance's log
+    still holds shadow-era SIMULATED settles from before the mode flip,
+    and summing them next to real-money settles misled the first live
+    readout (+$41 shown for a -$15 reality)."""
     tot, n = 0.0, 0
     sh_settled = 0.0
     for d in read_jsonl(os.path.join(logdir, "decisions.jsonl"), since_us):
         if d.get("kind") == "settled" and d.get("pnl") is not None:
+            if only_slugs is not None and d.get("slug") not in only_slugs:
+                continue
             tot += float(d["pnl"])
             n += 1
     for d in read_jsonl(os.path.join(logdir, "paper_fills.jsonl"),
                         since_us):
         if d.get("kind") == "settle":
+            if only_slugs is not None and d.get("slug") not in only_slugs:
+                continue
             sh_settled += float(d.get("shares", 0))
     return tot, n, sh_settled
 
@@ -123,7 +131,9 @@ def main():
         tag = "real" if real else "sim"
         oc, _osh = orders_of(ldir, since_us)
         p_pnl, p_n, p_sh_set = settles_of(pdir, since_us)
-        l_pnl, l_n, l_sh_set = settles_of(ldir, since_us)
+        l_pnl, l_n, l_sh_set = settles_of(
+            ldir, since_us,
+            only_slugs={k[0] for k in real} if real else None)
         p_px, p_sh = wavg_px(paper)
         l_px, l_sh = wavg_px(live)
         print(f"\n=== {coin} ===")
