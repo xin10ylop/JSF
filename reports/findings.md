@@ -759,6 +759,39 @@ awaiting strict-model proof -- still clears the bar IF it holds through
 2-3 strict-model days and the hybrid decay rows do not trend to zero.
 That is the go/no-go evidence now accumulating on its own.
 
+# 9.9 The contract changed AGAIN (~2026-08-14) -- and the machine absorbed it
+
+Caught from a live market description on 2026-08-19: every coin's 5m
+family now declares `twapLookbackSeconds: 60` (was 30), confirmed three
+ways -- gamma cryptoMarketConfig on all five coins' open markets, the
+resolutionSource stream URLs (`*-twap-60s-streams`), and an outcome
+horse race on 431 settled btc 5m markets from the last 36h (trailing-60
+agrees with the venue 0.9745 vs 0.9675 for trailing-30). The flip
+happened between 120h and 144h before 2026-08-19 ~19:00 UTC, i.e.
+around Aug 14 -- ONE DAY after the declared-contract tripwire deployed
+(f190f12: discover() reads the declared window per market, adopts 30 or
+60, refuses anything else). The 15m family is unchanged at 60s.
+
+Consequences:
+* the live bots have been trading the correct 60s window since the flip
+  with no human intervention -- roughly five of the six strict-model
+  record days (+$1,338/day, t=+7.99) are POST-flip, so the record is
+  the new contract's record, and the strategy demonstrably survives a
+  venue rule change end-to-end;
+* the tradable window per 5m market DOUBLED (gate rem <= min(60, w));
+  the w=60 mechanics were always our best per-share family (15m);
+* tape_chainlink (and therefore the nightly hybrid_decay rows since
+  Aug 14) benchmarked the dead 30s rule -- fixed: the window is now
+  read per market from the same metadata the bot trusts; decay rows
+  before this fix and after Aug 14 should be disregarded;
+* verification command for the droplet record:
+  grep -h contract_window logs/*/decisions.jsonl | head  -- the
+  tripwire logs every adoption.
+
+The changelog never announced this change either. The tripwire is not
+optional equipment; it is the reason this was a footnote instead of a
+disaster.
+
 # 10. The full pre-launch audit: fleet verdict and the closing record
 
 Six line-by-line reviewers (48 findings), six adversarial verifiers, and

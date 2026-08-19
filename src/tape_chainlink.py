@@ -43,6 +43,9 @@ BSYM = {"btc": "BTCUSDT", "eth": "ETHUSDT", "sol": "SOLUSDT",
 UA = {"User-Agent": "Mozilla/5.0"}
 FEE = 0.07
 STEP = {"5m": 300, "15m": 900}
+# FALLBACK ONLY -- the real window is read per market from gamma's
+# cryptoMarketConfig.twapLookbackSeconds (all 5m families moved 30 -> 60
+# on ~2026-08-14; zec 5m was already 60). Never trust a static map.
 WIN = {"5m": 30, "15m": 60}
 
 
@@ -165,7 +168,13 @@ def binance_by_sec(symbol, lo_s, hi_s):
 
 
 def market_meta(slugs):
-    """slug -> {up_win, cond_id, tok_up} from Gamma."""
+    """slug -> {up_win, cond_id, tok_up, w} from Gamma.
+
+    w is the market's DECLARED TWAP window (cryptoMarketConfig.
+    twapLookbackSeconds). It is not static: on ~2026-08-14 every coin's
+    5m family moved 30s -> 60s, and a benchmark that hardcodes the
+    window silently scores a dead contract from that day on. Read it
+    per market, exactly as the live bot's discover() tripwire does."""
     res, s = {}, requests.Session()
     s.headers.update(UA)
     slugs = sorted(set(slugs))
@@ -181,18 +190,26 @@ def market_meta(slugs):
                 for mk in r.json():
                     op, oc = mk.get("outcomePrices"), mk.get("outcomes")
                     tk = mk.get("clobTokenIds")
+                    cmc = mk.get("cryptoMarketConfig")
                     if isinstance(op, str):
                         op = json.loads(op)
                     if isinstance(oc, str):
                         oc = json.loads(oc)
                     if isinstance(tk, str):
                         tk = json.loads(tk)
+                    if isinstance(cmc, str):
+                        try:
+                            cmc = json.loads(cmc)
+                        except Exception:  # noqa: BLE001
+                            cmc = {}
                     if not op or not tk:
                         continue
                     iu = oc.index("Up") if oc and "Up" in oc else 0
+                    wdec = (cmc or {}).get("twapLookbackSeconds")
                     res[mk["slug"]] = {"up_win": float(op[iu]) > 0.5,
                                        "cond_id": mk.get("conditionId"),
-                                       "tok_up": str(tk[iu])}
+                                       "tok_up": str(tk[iu]),
+                                       "w": float(wdec) if wdec else None}
                 break
             except Exception:  # noqa: BLE001
                 time.sleep(1 + attempt)
@@ -301,16 +318,21 @@ def build(coin, fam, hours, lag):
         t0 = int(slug.rsplit("-", 1)[1])
         t1 = t0 + step
         rem = t1 - ts
-        if not (2.0 < rem <= w):
+        # The window is PER MARKET: gamma declares it, the live bot's
+        # tripwire adopts it, and this benchmark must score the same
+        # contract the bot trades -- the family default is only the
+        # fallback for markets whose metadata omits it.
+        wm = meta[slug].get("w") or w
+        if not (2.0 < rem <= wm):
             continue
         te = ts - lag
         rem_e = t1 - te
         if slug not in kcache:
-            ko_ps, ko_cov, ko_n = orc.integral(t0 - w, t0)
-            kb_ps, kb_cov, _ = bs.integral(t0 - w, t0)
+            ko_ps, ko_cov, ko_n = orc.integral(t0 - wm, t0)
+            kb_ps, kb_cov, _ = bs.integral(t0 - wm, t0)
             kcache[slug] = (
-                ko_ps / w if (ko_cov and ko_n >= 3) else None,
-                kb_ps / w if kb_cov else None)
+                ko_ps / wm if (ko_cov and ko_n >= 3) else None,
+                kb_ps / wm if kb_cov else None)
             if kcache[slug][0] is None:
                 skipped["k_orc"] += 1
             if kcache[slug][1] is None:
@@ -327,12 +349,12 @@ def build(coin, fam, hours, lag):
                 return None
             if sd1 is None or not np.isfinite(sd1) or sd1 <= 0:
                 return None
-            S, cov, _ = ser.integral(t1 - w, te)
+            S, cov, _ = ser.integral(t1 - wm, te)
             if not cov:
                 return None
             sigma = sd1 * spot
             sd = sigma * (rem_e ** 3 / 3.0) ** 0.5
-            return (S + rem_e * spot - w * K) / sd if sd > 0 else None
+            return (S + rem_e * spot - wm * K) / sd if sd > 0 else None
 
         z_o = z_from(orc, osig, K_o, orc.spot(te))
         z_b = z_from(bs, bsig, K_b, bs.spot(te))
