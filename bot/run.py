@@ -129,6 +129,7 @@ class Bot:
                 self._refire_block = {}
                 self._backoff_until = 0     # venue 429/post-only pause
                 self._prewarmed = set()     # slugs with warm SDK metadata
+                self._settle_verify = []    # (slug, our_result, due_us)
         # Total delay before a taker order can match. `venue_hold_ms` is the
         # venue's own documented 250 ms hold on crypto up/down markets ("the
         # order is held for 250 ms, then validation runs again and the order
@@ -377,6 +378,15 @@ class Bot:
                 self.log_decision({"kind": "settled", "slug": slug,
                                    "result": result, "pnl": pnl,
                                    "src": "oracle"})
+                if self.mode == "live":
+                    # Our oracle math scored a real-money market; verify
+                    # against the venue's own resolution in ~3 minutes.
+                    # Observed live: we scored a Down win (+0.14 booked)
+                    # on a market Polymarket resolved as a Down LOSS --
+                    # a mis-scored settle biases the kill switch in the
+                    # dangerous (optimistic) direction.
+                    self._settle_verify.append(
+                        (slug, result, now_us() + 180_000_000))
             elif any(k[0] == slug and v["shares"] > 0
                      for k, v in self.broker.positions.items()):
                 # We hold a position we cannot yet score. Dropping it here
@@ -704,6 +714,24 @@ class Bot:
                                        "err": repr(e)[:200]})
 
     async def _settle_pass(self, session, give_up_s):
+        for item in list(getattr(self, "_settle_verify", []) or []):
+            slug, res, due = item
+            if now_us() < due:
+                continue
+            self._settle_verify.remove(item)
+            truth = await self._gamma_result(session, slug)
+            if truth is None:
+                continue        # venue not resolved yet or voided
+            if truth != res:
+                self.log_decision({
+                    "kind": "settle_MISMATCH", "slug": slug,
+                    "our_result": res, "venue_result": truth,
+                    "note": "P&L and the halt ladder were fed OUR oracle "
+                            "score; the venue disagrees. Day risk state "
+                            "is suspect until reviewed."})
+            else:
+                self.log_decision({"kind": "settle_verified",
+                                   "slug": slug, "result": res})
         for slug, m in list(self.pending_settle.items()):
             result = self._settle_result(m)
             src = "oracle"
@@ -716,6 +744,9 @@ class Bot:
                 self.log_decision({"kind": "settled", "slug": slug,
                                    "result": result, "pnl": pnl,
                                    "src": src})
+                if self.mode == "live" and src == "oracle":
+                    self._settle_verify.append(
+                        (slug, result, now_us() + 180_000_000))
                 self.pending_settle.pop(slug, None)
             elif now_us() > m.t1_us + give_up_s * 1_000_000:
                 # Free the concurrency slot. An unscored position
@@ -1189,6 +1220,36 @@ class Bot:
             self.n_miss_why["blocked"] = \
                 self.n_miss_why.get("blocked", 0) + 1
             return
+        # A live order prices off OUR book view, and a desynced view is
+        # how launch day's worst trade happened: the Down book froze at
+        # 0.99 through a 1013 resubscribe while the venue traded 0.022,
+        # so the signal was priced 40x from reality. The paper path has
+        # this guard in _execute; live dispatch must not bypass it.
+        src_us = m.book_dn_us if (sig["side"] == "Down" and m.asks_dn) \
+            else m.book_us
+        if not src_us or (now - src_us) / 1e6 > 2.5:
+            self.n_miss += 1
+            self.n_miss_why["stale_book"] = \
+                self.n_miss_why.get("stale_book", 0) + 1
+            self.log_decision({"kind": "live_miss", "slug": m.slug,
+                               "side": sig["side"],
+                               "why": "book_view_stale",
+                               "age_s": round((now - src_us) / 1e6, 2)
+                               if src_us else None})
+            return
+        ev = sig.get("ev_est")
+        if ev is not None and ev < -0.10:
+            # Model and market disagreeing by >10c/share is not a
+            # signal, it is two inputs out of sync (stale oracle or
+            # stale book): the 0.99-vs-0.022 trade carried ev_est
+            # -0.196. Every validated profitable band prices within a
+            # few cents of empirical fair, so this guard costs none of
+            # the record -- it only refuses trades the strategy never
+            # meant to make.
+            self.log_decision({"kind": "blocked_divergence",
+                               "slug": m.slug, "side": sig["side"],
+                               "ev_est": round(ev, 4), "px": sig["px"]})
+            return
         o = {"slug": m.slug, "side": sig["side"], "limit": sig["px"],
              "size": float(size),
              "meta": {"reason": sig["reason"], "z": sig.get("z"),
@@ -1242,6 +1303,17 @@ class Bot:
                 mkt.claimed[o["side"]] += filled
             if st == "partial":
                 self.n_partial += 1
+            if (abs(filled - o["size"]) < 1e-9
+                    and abs(px - o["limit"]) < 1e-9
+                    and r.get("order_id")):
+                # A response echoing the order EXACTLY (full size at
+                # exactly the limit) is the async pipeline's
+                # match-intent signature; the real fill can differ
+                # (seen live: echoed 15 @ 0.99, actual 393 @ ~0.025).
+                # Pull the truth from the venue once it settles.
+                loop.run_in_executor(None, self._fill_truth,
+                                     r.get("order_id"), o["slug"],
+                                     o["side"])
         elif st == "killed":
             self.n_miss += 1
             self.n_miss_why["live_killed"] = \
@@ -1366,18 +1438,41 @@ class Bot:
                 self.log_decision({"kind": "live_ops_err",
                                    "err": repr(e)[:200]})
 
-    def _live_ops_pass(self):
-        # Housekeeping runs on its OWN client, i.e. its own HTTP
-        # connection: a redemption's transaction wait must never queue an
-        # order behind it, and sharing the order client's HTTP/2
-        # connection across threads is what lost two orders to
-        # stream-table corruption on launch day.
+    def _ops_client(self):
+        """Housekeeping/verification client on its OWN HTTP connection:
+        a redemption's transaction wait must never queue an order behind
+        it, and sharing the order client's HTTP/2 connection across
+        threads is what lost two orders to stream-table corruption on
+        launch day."""
         if self._ops_ex is None:
             from bot.live import LiveExecutor
             self._ops_ex = LiveExecutor(
                 shadow=False,
                 log_path=os.path.join(self.logdir, "ops.jsonl"))
-        cl = self._ops_ex.client
+        return self._ops_ex.client
+
+    def _fill_truth(self, order_id, slug, side):
+        """Ask the venue what an order REALLY did, ~3s after the echo-
+        shaped response that booked it. Log-only for now: the divergence
+        report and the morning review decide whether bookings need
+        correcting; the point tonight is that the truth is on disk."""
+        time.sleep(3.0)
+        try:
+            od = self._ops_client().get_order(order_id)
+            self.log_decision({
+                "kind": "fill_truth", "slug": slug, "side": side,
+                "order_id": str(order_id),
+                "truth": {k: str(getattr(od, k)) for k in (
+                    "status", "size_matched", "original_size", "price",
+                    "avg_price", "maker_amount", "taker_amount",
+                    "associate_trades", "outcome") if hasattr(od, k)}})
+        except Exception as e:  # noqa: BLE001
+            self.log_decision({"kind": "fill_truth_err",
+                               "order_id": str(order_id)[:24],
+                               "err": repr(e)[:150]})
+
+    def _live_ops_pass(self):
+        cl = self._ops_client()
         bal = None
         try:
             b = cl.get_balance_allowance(asset_type="COLLATERAL")
