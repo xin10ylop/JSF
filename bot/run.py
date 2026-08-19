@@ -130,6 +130,7 @@ class Bot:
                 self._backoff_until = 0     # venue 429/post-only pause
                 self._prewarmed = set()     # slugs with warm SDK metadata
                 self._settle_verify = []    # (slug, our_result, due_us)
+                self._day_bal_anchor = None  # (utc_day, balance at start)
         # Total delay before a taker order can match. `venue_hold_ms` is the
         # venue's own documented 250 ms hold on crypto up/down markets ("the
         # order is held for 250 ms, then validation runs again and the order
@@ -1483,6 +1484,31 @@ class Bot:
             bal = round(raw / 1e6 if raw > 1e4 else raw, 2)
         except Exception:  # noqa: BLE001
             pass
+        if bal is not None:
+            # CASH-ANCHORED daily kill floor, immune to bookkeeping. The
+            # booked day_pnl missed a breached daily stop on launch day
+            # (a phantom settle credited a win the venue never paid), so
+            # the stop is also enforced against the one number that
+            # cannot lie: the wallet. Floor = day-start balance minus
+            # the daily limit minus the largest legitimate in-flight
+            # exposure (concurrent markets x per-market cap), so normal
+            # open positions can never false-trip it.
+            day = time.strftime("%Y-%m-%d", time.gmtime())
+            if self._day_bal_anchor is None \
+                    or self._day_bal_anchor[0] != day:
+                self._day_bal_anchor = (day, bal)
+            floor = (self._day_bal_anchor[1]
+                     - abs(self.risk.daily_loss_limit)
+                     - self.risk.max_concurrent
+                     * self.risk.max_market_dollars)
+            if bal < floor and not self.risk.killed:
+                self.risk.killed = True
+                self.log_decision({
+                    "kind": "cash_kill", "bal": bal,
+                    "anchor": self._day_bal_anchor[1],
+                    "floor": round(floor, 2),
+                    "note": "cash drawdown breached the book-independent"
+                            " floor; killed for the rest of the UTC day"})
         conds, redeemed = [], 0
         try:
             for pos in cl.list_positions(redeemable=True):
