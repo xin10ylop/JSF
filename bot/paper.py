@@ -51,18 +51,24 @@ class PaperBroker:
                    meta=meta or {})
         return oid
 
-    def taker_fills(self, slug, side_label, legs, meta=None):
+    def taker_fills(self, slug, side_label, legs, meta=None, fee_per_sh=None):
         """Book one taker execution made of one or more price legs.
 
         `legs` is [(price, shares)] as produced by the caller walking the
         book. Each leg is logged separately so the scorer sees the real
         prices paid, not a flattering touch price. Returns total shares.
+
+        `fee_per_sh` overrides the modelled taker fee. Pass 0.0 when
+        booking a REAL venue fill: making/taking is the all-in cost per
+        share received (the fee is levied in the output asset), so adding
+        the modelled 0.07*p*(1-p) on top would charge it twice.
         """
         tot = 0.0
         for px, sh in legs:
             if sh <= 0 or px is None:
                 continue
-            fee = 0.07 * px * (1 - px)
+            fee = fee_per_sh if fee_per_sh is not None \
+                else 0.07 * px * (1 - px)
             pos = self.positions.setdefault(
                 (slug, side_label), {"shares": 0.0, "cost": 0.0})
             pos["shares"] += sh

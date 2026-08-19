@@ -281,6 +281,7 @@ def main():
     bt.risk = Risk({})
     bt.decisions = open("logs/reconcile_dec.jsonl", "a")
     bt.pending, bt.pending_settle, bt.n_miss = [], {}, 0
+    bt.inflight, bt.mode = [], "paper"   # live-mode plumbing, off here
     bt.n_reject = bt.n_partial = bt.n_sent = 0
     bt.n_miss_why = {"ask_gone": 0, "too_small": 0, "no_market": 0}
     bt.latency_us = 150_000

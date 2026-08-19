@@ -36,11 +36,11 @@ def _key():
 
 
 class LiveExecutor:
-    def __init__(self, shadow=True):
+    def __init__(self, shadow=True, log_path=LOG_PATH):
         self.shadow = shadow
         self._client = None
-        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-        self._log = open(LOG_PATH, "a")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        self._log = open(log_path, "a")
 
     def _emit(self, kind, **kw):
         kw["kind"] = kind
@@ -72,12 +72,17 @@ class LiveExecutor:
                        closed_only=bool(self._client.get_closed_only_mode()))
         return self._client
 
-    def submit_taker(self, token_id, side, shares, max_price, slug=None):
+    def submit_taker(self, token_id, side, shares, max_price, slug=None,
+                     outcome=None):
         """FAK buy of `shares` of `token_id` capped at `max_price`.
 
         Returns {"status": "shadow"|"filled"|"partial"|"killed"|
-                 "rejected"|"error", "filled": float, "detail": str}.
+                 "rejected"|"error", "filled": float, "avg_px": float|None,
+                 "order_id": str|None, "detail": str}. avg_px is the ALL-IN
+        cost per share received (making/taking), so the taker fee -- levied
+        in the output asset on this venue -- is already inside it.
         In shadow mode the order is built and logged but never sent.
+        `outcome` ("Up"/"Down") is log-only, for the divergence report.
         """
         # The SDK denominates BUY market orders in DOLLARS: amount is the
         # spend, max_price caps the per-share price. shares*max_price
@@ -88,11 +93,12 @@ class LiveExecutor:
         amount = (Decimal(str(shares)) * Decimal(str(max_price))
                   ).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
         req = {"slug": slug, "token_id": str(token_id)[:16] + "...",
-               "side": side, "shares": float(shares),
+               "side": side, "outcome": outcome, "shares": float(shares),
                "amount_usd": float(amount), "max_price": float(max_price)}
         if self.shadow:
             self._emit("shadow_order", **req)
-            return {"status": "shadow", "filled": 0.0, "detail": "not sent"}
+            return {"status": "shadow", "filled": 0.0, "avg_px": None,
+                    "order_id": None, "detail": "not sent"}
         try:
             r = self.client.place_market_order(
                 token_id=str(token_id), side=side, amount=amount,
@@ -109,30 +115,36 @@ class LiveExecutor:
                     or "no orders found to match" in msg
                     or "no match is found" in msg):
                 self._emit("order_killed_no_liquidity", err=msg[:200], **req)
-                return {"status": "killed", "filled": 0.0,
+                return {"status": "killed", "filled": 0.0, "avg_px": None,
+                        "order_id": None,
                         "detail": "no liquidity at limit (FAK kill)"}
             self._emit("order_error", err=repr(e)[:300], **req)
-            return {"status": "error", "filled": 0.0,
-                    "detail": repr(e)[:300]}
+            return {"status": "error", "filled": 0.0, "avg_px": None,
+                    "order_id": None, "detail": repr(e)[:300]}
         if not getattr(r, "ok", False):
             self._emit("order_rejected", code=getattr(r, "code", None),
                        message=getattr(r, "message", "")[:300], **req)
-            return {"status": "rejected", "filled": 0.0,
+            return {"status": "rejected", "filled": 0.0, "avg_px": None,
+                    "order_id": None,
                     "detail": f"{getattr(r, 'code', '')}: "
                               f"{getattr(r, 'message', '')}"}
         making = float(getattr(r, "making_amount", 0) or 0)
         taking = float(getattr(r, "taking_amount", 0) or 0)
         # For a BUY: making = collateral given, taking = shares received.
         # The API sometimes reports raw 6-decimal units (the balance
-        # endpoint does); normalise heuristically until the first real
-        # fills pin it down -- the divergence report recalibrates anyway.
+        # endpoint does); the SAME scale applies to both sides of one
+        # response, so making/taking is a unit-invariant price and only
+        # the share count needs the heuristic. Real fills pin it down;
+        # the divergence report recalibrates anyway.
+        scale = 1e6 if taking > float(shares) * 1000 else 1.0
+        making, taking = making / scale, taking / scale
         filled = taking
-        if filled > float(shares) * 1000:
-            filled = filled / 1e6
-        self._emit("order_result", order_id=getattr(r, "order_id", None),
+        avg_px = round(making / taking, 6) if taking > 0 else None
+        oid = getattr(r, "order_id", None)
+        self._emit("order_result", order_id=oid,
                    status=str(getattr(r, "status", "")),
-                   making=making, taking=taking, **req)
+                   making=making, taking=taking, avg_px=avg_px, **req)
         status = "filled" if filled >= float(shares) - 1e-9 else (
             "partial" if filled > 0 else "killed")
-        return {"status": status, "filled": filled,
-                "detail": str(getattr(r, "status", ""))}
+        return {"status": status, "filled": filled, "avg_px": avg_px,
+                "order_id": oid, "detail": str(getattr(r, "status", ""))}

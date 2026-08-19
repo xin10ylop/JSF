@@ -1,0 +1,58 @@
+{
+  "mode": "shadow",
+  "_mode_note": "shadow = paper simulation PLUS a signed-order log of exactly what live would send (no network, no key needed). Flip to \"live\" ONLY after 1-2 days of shadow shows the order log matching the paper fills, then commit the flip so the record shows when real money started. The paper fleet (bot/config.json, logs/<coin>/) keeps running unchanged as the frozen baseline for src/live_vs_paper.py.",
+  "families": {
+    "5m": 300,
+    "15m": 900
+  },
+  "risk": {
+    "max_market_shares": 20,
+    "max_market_dollars": 15.0,
+    "max_concurrent_markets": 2,
+    "daily_loss_limit": 25.0,
+    "stale_oracle_s": 5.0,
+    "stale_book_s": 10.0,
+    "halt": {
+      "streak_n": 20,
+      "streak_losses": 6,
+      "cooloff_s": 7200,
+      "resume_frac": 0.5,
+      "probe_markets": 10,
+      "probe_losses": 3
+    },
+    "_micro_note": "MICRO-LIVE sizing for a ~$130 bankroll across 3 coins. Worst-case committed exposure 3 x 2 x $15 = $90; worst-case settled day 3 x -$25 = -$75. The halt ladder is identical to paper -- it detects breakage in ~20 markets, which at micro size costs cents, exactly when detection is cheapest. Scale sizes only AFTER a week of live-vs-paper reconciliation, and A/B the raise in paper first."
+  },
+  "rollavg_edge": {
+    "enabled": true,
+    "window_s": 60,
+    "zmin": 2.0,
+    "edge_min": 0.02,
+    "size": 10,
+    "max_price": 0.99,
+    "min_rem_s": 2.0,
+    "require_edge": false,
+    "cooldown_s": 0.0,
+    "skip_px": null,
+    "min_price": 0.0,
+    "_size_note": "10 shares (~$9 at typical fill px) against paper's 100. Every GATE is identical to the frozen paper config -- same zmin, same max_price, same window -- so live and paper disagree only about execution, which is the one thing micro-live exists to measure. The venue min is 5 shares; risk room below that is logged as live_miss/below_venue_min, not sent."
+  },
+  "coin": "btc",
+  "coins": [
+    "btc",
+    "eth",
+    "sol"
+  ],
+  "_coins_note": "Live roster per the strict-model gate: btc/eth/sol passed (6 days, t=+7.99 aggregate). xrp is excluded (-0.16c/sh strict), doge held back as paper-only until its +0.57 firms up.",
+  "venue_hold_ms": 250,
+  "rtt_ms": 160,
+  "_latency_note": "Used by the paper half of shadow mode only. In live mode no simulated latency is added: the venue's real 250ms hold and the real Amsterdam rtt replace the model.",
+  "fill": {
+    "participation": 0.5,
+    "vol_participation": 0.25,
+    "vol_window_s": 5.0,
+    "reject_rate": 0.01,
+    "min_order_size": 5.0,
+    "use_tape_cap": true
+  },
+  "_fill_note": "Drives the paper simulation inside shadow mode and min_order_size (the venue's orderMinSize) in live mode. The rest is ignored by the live path: reality fills real orders."
+}

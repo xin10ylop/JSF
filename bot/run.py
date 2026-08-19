@@ -1,14 +1,23 @@
-"""Main bot loop (paper mode).
+"""Main bot loop: one codebase, three execution modes.
 
 Wires live feeds (Binance ws, RTDS oracle ws, CLOB market ws) into
-BotState, evaluates strategies each tick, routes orders to PaperBroker,
-and settles positions off the oracle at window end.
+BotState, evaluates strategies each tick, and settles positions off the
+oracle at window end. `mode` in the config picks what a taker signal
+becomes -- everything upstream of that branch is IDENTICAL, which is the
+whole point: the live record and the paper record must disagree only
+about execution, never about signals.
 
-Live order mode is intentionally NOT implemented until paper-vs-backtest
-reconciliation passes; the execution interface is the single place to swap
-PaperBroker for a CLOB client.
+  paper   simulate fills through the latency/participation model
+          (PaperBroker), logs to logs/<coin>/
+  shadow  paper simulation PLUS a signed-order log of exactly what live
+          mode would have sent, logs to logs/live/<coin>/
+  live    send a real FAK to the CLOB via bot/live.py and book the
+          venue's actual fill into the same broker/risk/settle path.
+          No simulated latency: the venue's own 250ms hold and our real
+          rtt replace the model. Logs to logs/live/<coin>/
 
-Run: python3 bot/run.py            (paper mode, logs to logs/)
+Run: python3 bot/run.py --coin btc                      (paper)
+     python3 bot/run.py --coin btc --cfg bot/config.live.json
 """
 import asyncio
 import json
@@ -35,8 +44,9 @@ CFG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 LOCAL_CFG_PATH = os.path.join(os.path.dirname(__file__), "config.local.json")
 
 
-def load_cfg():
-    """config.json, then bot/config.local.json shallow-merged over it.
+def load_cfg(path=None):
+    """config.json (or `path`), then bot/config.local.json shallow-merged
+    over it.
 
     Host-specific values (rtt_ms above all) belong to the machine, not the
     repo. Writing them into the tracked config made `git pull` abort with
@@ -44,7 +54,7 @@ def load_cfg():
     multi-coin build silently failed to deploy. The local file is
     gitignored, so measuring latency and pulling code never collide again.
     """
-    with open(CFG_PATH) as f:
+    with open(path or CFG_PATH) as f:
         cfg = json.load(f)
     if os.path.exists(LOCAL_CFG_PATH):
         with open(LOCAL_CFG_PATH) as f:
@@ -56,11 +66,19 @@ class Bot:
     def __init__(self, cfg, coin=None):
         self.cfg = cfg
         self.coin = coin or cfg.get("coin", "btc")
+        self.mode = cfg.get("mode", "paper")
+        if self.mode not in ("paper", "shadow", "live"):
+            raise SystemExit(f"unknown mode {self.mode!r}")
         self.state = BotState(self.coin)
         # One process per coin, so the record has to be per coin too: a
         # shared fill log would interleave five bots' fills and make the
         # per-coin edge unreadable. src/score_paper.py globs logs/*/.
-        self.logdir = os.path.join("logs", self.coin)
+        # Shadow/live instances live under logs/live/<coin> -- OUTSIDE
+        # that glob -- so the frozen paper baseline the divergence report
+        # compares against is never contaminated by micro-sized records.
+        self.logdir = (os.path.join("logs", "live", self.coin)
+                       if self.mode != "paper"
+                       else os.path.join("logs", self.coin))
         os.makedirs(self.logdir, exist_ok=True)
         self.broker = PaperBroker(
             log_path=os.path.join(self.logdir, "paper_fills.jsonl"))
@@ -77,7 +95,22 @@ class Bot:
         self.decisions = open(
             os.path.join(self.logdir, "decisions.jsonl"), "a")
         self.pending_settle = {}   # slug -> MarketState awaiting settlement
-        self.pending = []          # latency-delayed taker orders
+        self.pending = []          # latency-delayed taker orders (paper sim)
+        self.inflight = []         # live orders at the venue, result pending
+        self.executor = None
+        if self.mode != "paper":
+            from bot.live import LiveExecutor
+            self.executor = LiveExecutor(
+                shadow=(self.mode != "live"),
+                log_path=os.path.join(self.logdir, "orders.jsonl"))
+            if self.mode == "live":
+                # Fail-fast: derive credentials NOW, before any feed
+                # starts. A live bot that silently cannot authenticate
+                # would run the whole strategy and drop every order.
+                cl = self.executor.client
+                if cl.get_closed_only_mode():
+                    raise SystemExit("account is in closed-only mode; "
+                                     "refusing to start live")
         # Total delay before a taker order can match. `venue_hold_ms` is the
         # venue's own documented 250 ms hold on crypto up/down markets ("the
         # order is held for 250 ms, then validation runs again and the order
@@ -775,10 +808,11 @@ class Bot:
                 "book_age_s": (round((now_us() - m.book_us) / 1e6, 1)
                                if m.book_us else None)}
         self.log_decision({
-            "kind": "health", "markets": len(s.markets),
+            "kind": "health", "mode": self.mode, "markets": len(s.markets),
             "uptime_s": round((now_us() - self.started_us) / 1e6, 1),
             "pending_settle": len(self.pending_settle),
-            "pending_orders": len(self.pending), "misses": self.n_miss,
+            "pending_orders": len(self.pending),
+            "inflight": len(self.inflight), "misses": self.n_miss,
             "orders_sent": self.n_sent,
             "venue_rejects": self.n_reject, "partials": self.n_partial,
             "miss_why": dict(self.n_miss_why),
@@ -1017,7 +1051,7 @@ class Bot:
             if (self.broker.positions.get((m.slug, other),
                                           {}).get("shares", 0) > 0
                     or any(o["slug"] == m.slug and o["side"] == other
-                           for o in self.pending)):
+                           for o in self.pending + self.inflight)):
                 self.log_decision({"kind": "blocked_opposite_side",
                                    "slug": m.slug, "side": sig["side"],
                                    "holding": other})
@@ -1029,14 +1063,16 @@ class Bot:
             # order queued inside the latency window see an empty book and
             # get approved -- observed live as 700 shares in a market whose
             # cap is ~187, from seven identical 39.3-share fills at 0.800.
-            q_sh = sum(o["size"] for o in self.pending
+            q_sh = sum(o["size"] for o in self.pending + self.inflight
                        if o["slug"] == m.slug and o["side"] == sig["side"])
-            q_usd = sum(o["size"] * o["limit"] for o in self.pending
+            q_usd = sum(o["size"] * o["limit"]
+                        for o in self.pending + self.inflight
                         if o["slug"] == m.slug and o["side"] == sig["side"])
             pos = {"shares": pos["shares"] + q_sh,
                    "cost": pos["cost"] + q_usd}
             nmk = len({k[0] for k, v in self.broker.positions.items()
-                       if v["shares"] > 0} | {o["slug"] for o in self.pending})
+                       if v["shares"] > 0}
+                      | {o["slug"] for o in self.pending + self.inflight})
             px = sig.get("level", sig.get("px", 0.5))
             size = self.risk.size_ok(pos["shares"], pos["cost"],
                                      sig["size"], px, nmk)
@@ -1059,6 +1095,13 @@ class Bot:
                     now_us() + int(sig.get("ttl_s", 20) * 1e6),
                     meta={"reason": sig["reason"]})
             elif sig["action"] == "taker_buy":
+                if self.mode == "live":
+                    # Real order, sent NOW: the venue's own 250ms hold and
+                    # our real rtt replace the simulated latency -- adding
+                    # both would double the delay the paper model exists
+                    # to imitate.
+                    self._dispatch_live(m, sig, size)
+                    continue
                 # Do NOT fill at the price we just saw. A marketable order
                 # reaches the venue `latency_ms` later and executes against
                 # whatever is resting THEN, up to our limit. 63% of paper
@@ -1075,6 +1118,168 @@ class Bot:
                              "z": sig.get("z"),
                              "ev_est": sig.get("ev_est"),
                              "seen_px": sig["px"]}})
+                if self.mode == "shadow" and self.executor is not None:
+                    # The execution-shadow record: exactly the order live
+                    # mode would send, logged next to the paper fill the
+                    # simulator books for the same signal. No network.
+                    tok = m.asset_id_up if sig["side"] == "Up" \
+                        else m.asset_id_dn
+                    if tok:
+                        self.executor.submit_taker(
+                            tok, "BUY", size, sig["px"], slug=m.slug,
+                            outcome=sig["side"])
+
+    # ---- live execution ------------------------------------------------
+    def _dispatch_live(self, m, sig, size):
+        """Send one real FAK for a sized signal, tracking it as exposure.
+
+        The order enters `self.inflight` BEFORE the network call starts:
+        the round trip takes ~0.5-1s and signals keep firing meanwhile, so
+        an untracked in-flight order is exactly the invisible-exposure bug
+        the pending-queue accounting exists to prevent.
+        """
+        tok = m.asset_id_up if sig["side"] == "Up" else m.asset_id_dn
+        if not tok:
+            self.n_miss += 1
+            self.n_miss_why["no_market"] += 1
+            self.log_decision({"kind": "live_miss", "slug": m.slug,
+                               "side": sig["side"], "why": "no_token"})
+            return
+        if size < self.fill_cfg["min_order_size"]:
+            # The venue's orderMinSize is 5 shares; risk room below that
+            # cannot be sent, only logged.
+            self.n_miss += 1
+            self.n_miss_why["too_small"] += 1
+            self.log_decision({"kind": "live_miss", "slug": m.slug,
+                               "side": sig["side"], "why": "below_venue_min",
+                               "size": round(size, 2)})
+            return
+        o = {"slug": m.slug, "side": sig["side"], "limit": sig["px"],
+             "size": float(size),
+             "meta": {"reason": sig["reason"], "z": sig.get("z"),
+                      "oracle_age_s": sig.get("oracle_age_s"),
+                      "ev_est": sig.get("ev_est"), "seen_px": sig["px"]}}
+        self.inflight.append(o)
+        self.n_sent += 1
+        asyncio.get_running_loop().create_task(self._live_roundtrip(o, tok))
+
+    async def _live_roundtrip(self, o, token):
+        """Await one venue round trip in a worker thread and book reality.
+
+        The SDK call blocks through the venue's 250ms hold and returns the
+        final fill synchronously; running it on the event loop would stall
+        every feed for the duration, so it goes through run_in_executor.
+        Whatever ACTUALLY filled -- shares and all-in price from
+        making/taking -- is booked into the same broker the paper model
+        uses, so settlement, risk, the halt ladder and the scorer all run
+        on real numbers with zero new code paths.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            r = await loop.run_in_executor(
+                None, lambda: self.executor.submit_taker(
+                    token, "BUY", o["size"], o["limit"], slug=o["slug"],
+                    outcome=o["side"]))
+        except Exception as e:  # noqa: BLE001
+            r = {"status": "error", "filled": 0.0,
+                 "detail": repr(e)[:300]}
+        finally:
+            try:
+                self.inflight.remove(o)
+            except ValueError:
+                pass
+        st = r.get("status")
+        filled = float(r.get("filled") or 0)
+        if st in ("filled", "partial") and filled > 0:
+            px = float(r.get("avg_px") or o["limit"])
+            meta = dict(o["meta"])
+            meta.update(requested=o["size"], live=True,
+                        order_id=r.get("order_id"))
+            # fee_per_sh=0: making/taking is all-in (fee levied in the
+            # output asset), so the modelled fee must not be added again.
+            self.broker.taker_fills(o["slug"], o["side"], [(px, filled)],
+                                    meta=meta, fee_per_sh=0.0)
+            mkt = self.state.markets.get(o["slug"])
+            if mkt is not None:
+                mkt.claimed[o["side"]] += filled
+            if st == "partial":
+                self.n_partial += 1
+        elif st == "killed":
+            self.n_miss += 1
+            self.n_miss_why["live_killed"] = \
+                self.n_miss_why.get("live_killed", 0) + 1
+            self.log_decision({"kind": "taker_miss", "slug": o["slug"],
+                               "side": o["side"], "limit": o["limit"],
+                               "why": "live_fak_killed"})
+        elif st == "rejected":
+            self.n_reject += 1
+            d = (r.get("detail") or "").lower()
+            kind = "live_balance_reject" if any(
+                w in d for w in ("balance", "allowance", "collateral",
+                                 "fund")) else "live_reject"
+            self.log_decision({"kind": kind, "slug": o["slug"],
+                               "side": o["side"],
+                               "detail": (r.get("detail") or "")[:200]})
+        else:
+            self.log_decision({"kind": "live_order_error", "slug": o["slug"],
+                               "side": o["side"],
+                               "detail": (r.get("detail") or "")[:200]})
+
+    async def live_ops_loop(self):
+        """Live-mode housekeeping every 5 minutes: redeem resolved
+        winnings back into pUSD and log the spendable balance.
+
+        Winnings arrive as conditional tokens; until redeemed they are
+        dead capital, and with a micro bankroll the bot would run dry of
+        collateral within hours and every order after that would come
+        back `live_balance_reject`. The balance line in the decision log
+        is the recycling gauge -- flat-while-winning means redemption is
+        broken and this loop's errors say why.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(300)
+            try:
+                bal, redeemed = await loop.run_in_executor(
+                    None, self._live_ops_pass)
+                self.log_decision({"kind": "live_balance", "usdc": bal,
+                                   "redeemed": redeemed})
+            except Exception as e:  # noqa: BLE001
+                self.log_decision({"kind": "live_ops_err",
+                                   "err": repr(e)[:200]})
+
+    def _live_ops_pass(self):
+        cl = self.executor.client
+        bal = None
+        try:
+            b = cl.get_balance_allowance(asset_type="COLLATERAL")
+            raw = float(getattr(b, "balance", 0) or 0)
+            # raw 6-decimal units vs dollars; a real balance would need to
+            # exceed $10k to fool this, two orders of magnitude past the
+            # micro bankroll.
+            bal = round(raw / 1e6 if raw > 1e4 else raw, 2)
+        except Exception:  # noqa: BLE001
+            pass
+        conds, redeemed = [], 0
+        try:
+            for pos in cl.list_positions(redeemable=True):
+                c = str(getattr(pos, "condition_id", "") or "")
+                if c and c not in conds:
+                    conds.append(c)
+                if len(conds) >= 20:    # bound one pass; the next sweep
+                    break               # is 5 minutes away
+        except Exception as e:  # noqa: BLE001
+            self.log_decision({"kind": "redeem_list_err",
+                               "err": repr(e)[:150]})
+        for c in conds:
+            try:
+                h = cl.redeem_positions(condition_id=c)
+                getattr(h, "wait", lambda: None)()
+                redeemed += 1
+            except Exception as e:  # noqa: BLE001
+                self.log_decision({"kind": "redeem_err", "cond": c[:18],
+                                   "err": repr(e)[:150]})
+        return bal, redeemed
 
     async def decide_loop(self):
         """1s safety net. The primary path is event-driven off book updates
@@ -1096,10 +1301,13 @@ class Bot:
                 await asyncio.sleep(15)
 
     async def main(self):
-        await asyncio.gather(self.binance_feed(), self.rtds_feed(),
-                             self.clob_feed(), self.decide_loop(),
-                             self.discovery_loop(), self.health_loop(),
-                             self.settle_loop())
+        tasks = [self.binance_feed(), self.rtds_feed(),
+                 self.clob_feed(), self.decide_loop(),
+                 self.discovery_loop(), self.health_loop(),
+                 self.settle_loop()]
+        if self.mode == "live":
+            tasks.append(self.live_ops_loop())
+        await asyncio.gather(*tasks)
 
 
 def acquire_lock(path):
@@ -1132,9 +1340,22 @@ if __name__ == "__main__":
     ap.add_argument("--coin", default=None, choices=sorted(COINS),
                     help="which coin this process trades "
                          "(default: config's `coin`)")
+    ap.add_argument("--cfg", default=None,
+                    help="alternate config file (e.g. bot/config.live.json);"
+                         " config.local.json still merges over it")
+    ap.add_argument("--mode", default=None,
+                    choices=["paper", "shadow", "live"],
+                    help="override the config's mode (ad-hoc testing only;"
+                         " deployed units should get mode from the config)")
     args = ap.parse_args()
-    cfg = load_cfg()
+    cfg = load_cfg(args.cfg)
+    if args.mode:
+        cfg["mode"] = args.mode
     coin = args.coin or cfg.get("coin", "btc")
-    _lock = acquire_lock(f"logs/{coin}/bot.lock")
+    # Shadow/live instances lock in their own tree: they run BESIDE the
+    # paper bot for the same coin by design, not instead of it.
+    lockdir = (f"logs/live/{coin}" if cfg.get("mode", "paper") != "paper"
+               else f"logs/{coin}")
+    _lock = acquire_lock(f"{lockdir}/bot.lock")
     bot = Bot(cfg, coin=coin)
     asyncio.run(bot.main())
