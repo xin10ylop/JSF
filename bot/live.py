@@ -140,6 +140,7 @@ class LiveExecutor:
             # found nothing at the limit). Both are normal FAK kill
             # semantics -- zero dollars spent, not an error.
             msg = repr(e)
+            low = msg.lower()
             if ("InsufficientLiquidity" in msg
                     or "no orders found to match" in msg
                     or "no match is found" in msg):
@@ -147,6 +148,30 @@ class LiveExecutor:
                 return {"status": "killed", "filled": 0.0, "avg_px": None,
                         "order_id": None,
                         "detail": "no liquidity at limit (FAK kill)"}
+            # Documented NON-terminal outcomes (docs/error-codes): the
+            # venue may still hold or execute the order, its collateral
+            # is reserved, and 'dropping the connection ... won't stop
+            # it'. Booking these as kills licenses an immediate re-fire
+            # on top of a possibly-live order -- the double-fill path.
+            if "order match delayed" in low:
+                self._emit("order_pending", err=msg[:200], **req)
+                return {"status": "pending", "filled": 0.0, "avg_px": None,
+                        "order_id": None,
+                        "detail": "match delayed; order still ACTIVE"}
+            if ("timed out" in low or "timeout" in low
+                    or "transporterror" in low or "connecterror" in low
+                    or "readerror" in low or "remoteprotocol" in low):
+                self._emit("order_unknown", err=msg[:250], **req)
+                return {"status": "unknown", "filled": 0.0, "avg_px": None,
+                        "order_id": None,
+                        "detail": "outcome UNKNOWN (timeout/transport); "
+                                  "venue may still execute"}
+            if "429" in msg or "too many" in low or "rate limit" in low \
+                    or "post_only" in low or "cancel-only" in low \
+                    or "too early" in low:
+                self._emit("order_backoff", err=msg[:200], **req)
+                return {"status": "backoff", "filled": 0.0, "avg_px": None,
+                        "order_id": None, "detail": msg[:200]}
             self._emit("order_error", err=repr(e)[:300], **req)
             return {"status": "error", "filled": 0.0, "avg_px": None,
                     "order_id": None, "detail": repr(e)[:300]}
@@ -157,6 +182,19 @@ class LiveExecutor:
                     "order_id": None,
                     "detail": f"{getattr(r, 'code', '')}: "
                               f"{getattr(r, 'message', '')}"}
+        st_venue = str(getattr(r, "status", "") or "").lower()
+        if st_venue in ("live", "delayed"):
+            # Async-pipeline statuses: accepted but not terminally
+            # matched here. NOT a kill -- treat as pending and let the
+            # caller block re-fires while the venue resolves it.
+            self._emit("order_pending",
+                       order_id=getattr(r, "order_id", None),
+                       status=st_venue,
+                       trade_ids=list(getattr(r, "trade_ids", ()) or ()),
+                       **req)
+            return {"status": "pending", "filled": 0.0, "avg_px": None,
+                    "order_id": getattr(r, "order_id", None),
+                    "detail": f"venue status {st_venue}"}
         making = float(getattr(r, "making_amount", 0) or 0)
         taking = float(getattr(r, "taking_amount", 0) or 0)
         # For a BUY: making = collateral given, taking = shares received.
@@ -172,6 +210,7 @@ class LiveExecutor:
         oid = getattr(r, "order_id", None)
         self._emit("order_result", order_id=oid,
                    status=str(getattr(r, "status", "")),
+                   trade_ids=list(getattr(r, "trade_ids", ()) or ()),
                    making=making, taking=taking, avg_px=avg_px, **req)
         status = "filled" if filled >= float(sh) - 1e-9 else (
             "partial" if filled > 0 else "killed")

@@ -122,6 +122,13 @@ class Bot:
                 self._order_pool = ThreadPoolExecutor(
                     max_workers=1, thread_name_prefix="order")
                 self._ops_ex = None
+                # (slug,side) -> until_us. Set when an order's outcome is
+                # NOT terminal (venue 'delayed'/'live', timeouts): the
+                # venue reserves collateral and may still execute it, so
+                # re-firing there is the double-fill path.
+                self._refire_block = {}
+                self._backoff_until = 0     # venue 429/post-only pause
+                self._prewarmed = set()     # slugs with warm SDK metadata
         # Total delay before a taker order can match. `venue_hold_ms` is the
         # venue's own documented 250 ms hold on crypto up/down markets ("the
         # order is held for 250 ms, then validation runs again and the order
@@ -1168,6 +1175,20 @@ class Bot:
                                "side": sig["side"], "why": "below_venue_min",
                                "size": round(size, 2)})
             return
+        now = now_us()
+        if now < self._backoff_until:
+            self.n_miss += 1
+            self.n_miss_why["blocked"] = \
+                self.n_miss_why.get("blocked", 0) + 1
+            self.log_decision({"kind": "live_miss", "slug": m.slug,
+                               "side": sig["side"], "why": "venue_backoff"})
+            return
+        if now < self._refire_block.get((m.slug, sig["side"]), 0):
+            # an earlier order here has an unresolved outcome; skipping
+            # silently -- the block itself was logged when it was set
+            self.n_miss_why["blocked"] = \
+                self.n_miss_why.get("blocked", 0) + 1
+            return
         o = {"slug": m.slug, "side": sig["side"], "limit": sig["px"],
              "size": float(size),
              "meta": {"reason": sig["reason"], "z": sig.get("z"),
@@ -1228,12 +1249,35 @@ class Bot:
             self.log_decision({"kind": "taker_miss", "slug": o["slug"],
                                "side": o["side"], "limit": o["limit"],
                                "why": "live_fak_killed"})
+        elif st in ("pending", "unknown"):
+            # Venue may still execute this order (collateral reserved; a
+            # dropped connection does not stop it). Block this
+            # (slug,side) long enough to resolve; the 5-min balance
+            # sweep arbitrates what actually happened.
+            self._refire_block[(o["slug"], o["side"])] = \
+                now_us() + 10_000_000
+            self.log_decision({"kind": f"live_{st}", "slug": o["slug"],
+                               "side": o["side"],
+                               "order_id": r.get("order_id"),
+                               "detail": (r.get("detail") or "")[:200]})
+        elif st == "backoff":
+            # 429 / post-only maintenance window: venue said stand down,
+            # not "this order was bad". Global pause, not an error.
+            self._backoff_until = now_us() + 3_000_000
+            self.log_decision({"kind": "live_backoff", "slug": o["slug"],
+                               "detail": (r.get("detail") or "")[:200]})
         elif st == "rejected":
             self.n_reject += 1
             d = (r.get("detail") or "").lower()
             kind = "live_balance_reject" if any(
                 w in d for w in ("balance", "allowance", "collateral",
                                  "fund")) else "live_reject"
+            if kind == "live_balance_reject":
+                # burst orders colliding with a 250ms hold's collateral
+                # RESERVATION look like empty pockets; brief block, and
+                # the ops balance line arbitrates real depletion
+                self._refire_block[(o["slug"], o["side"])] = \
+                    now_us() + 2_000_000
             self.log_decision({"kind": kind, "slug": o["slug"],
                                "side": o["side"],
                                "detail": (r.get("detail") or "")[:200]})
@@ -1245,22 +1289,59 @@ class Bot:
     async def live_keepalive_loop(self):
         """Keep the ORDER client's connection hot.
 
-        Signals are minutes apart and Cloudflare closes idle connections
-        well within that, so a cold order pays TCP+TLS+HTTP/2 setup
-        INSIDE the race the venue's 250ms hold already makes tight --
-        pure lost conversion. A tiny authenticated GET every 45s, on the
-        same thread and connection the orders use, means every real
-        order departs on a warm socket.
+        Signals are minutes apart; the SDK hardcodes httpx
+        keepalive_expiry=30s and Cloudflare reaps idle connections too,
+        so a cold order pays TCP+TLS+HTTP/2 setup INSIDE the race the
+        venue's 250ms hold already makes tight -- pure lost conversion.
+        Every 20s (UNDER the 30s pool expiry; the first 45s interval sat
+        just past it and warmed nothing), an authenticated GET that
+        rides the SAME `secure_clob` transport post_order uses -- warming
+        any other of the SDK's nine per-purpose httpx clients would keep
+        the wrong socket alive.
         """
         loop = asyncio.get_running_loop()
         while True:
-            await asyncio.sleep(45)
+            await asyncio.sleep(20)
             try:
                 await loop.run_in_executor(
                     self._order_pool,
                     lambda: self.executor.client.get_closed_only_mode())
             except Exception:  # noqa: BLE001
                 pass    # order errors are logged on their own path
+            self._maybe_prewarm()
+
+    def _maybe_prewarm(self):
+        """Warm the SDK's per-token market-metadata cache BEFORE the
+        firing window. create_limit_order is not pure local signing: on
+        a cache miss it performs TWO blocking HTTP GETs (token->condition
+        resolve + market record), and the cache TTL is ~10 minutes -- so
+        without this, the FIRST order of every market pays the exact
+        round trips the direct-posting build removed. A discarded
+        sign-only order per token on the order thread, once per market,
+        when its window is 2.5 minutes out."""
+        now = now_us()
+        # prune expired re-fire blocks while we're here
+        for k in [k for k, v in self._refire_block.items() if v < now]:
+            self._refire_block.pop(k, None)
+        loop = asyncio.get_running_loop()
+        for m in list(self.state.markets.values()):
+            rem = (m.t1_us - now) / 1e6
+            if not (0 < rem <= 150) or m.slug in self._prewarmed:
+                continue
+            self._prewarmed.add(m.slug)
+            for tok in (m.asset_id_up, m.asset_id_dn):
+                if not tok:
+                    continue
+
+                def _warm(t=str(tok)):
+                    try:
+                        self.executor.client.create_limit_order(
+                            token_id=t, side="BUY", price="0.01", size="5")
+                    except Exception:  # noqa: BLE001
+                        pass            # warming is best-effort
+                loop.run_in_executor(self._order_pool, _warm)
+        if len(self._prewarmed) > 64:
+            self._prewarmed &= set(self.state.markets)
 
     async def live_ops_loop(self):
         """Live-mode housekeeping every 5 minutes: redeem resolved
