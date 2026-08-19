@@ -58,10 +58,11 @@ class PaperBroker:
         book. Each leg is logged separately so the scorer sees the real
         prices paid, not a flattering touch price. Returns total shares.
 
-        `fee_per_sh` overrides the modelled taker fee. Pass 0.0 when
-        booking a REAL venue fill: making/taking is the all-in cost per
-        share received (the fee is levied in the output asset), so adding
-        the modelled 0.07*p*(1-p) on top would charge it twice.
+        `fee_per_sh` overrides the modelled taker fee; None (the default)
+        books 0.07*px*(1-px). Real venue fills book the default too: the
+        venue charges that fee ON TOP of the matched amount in collateral
+        (verified to the cent against account activity on the first live
+        fills), so the modelled fee IS the real one.
         """
         tot = 0.0
         for px, sh in legs:

@@ -78,9 +78,12 @@ class LiveExecutor:
 
         Returns {"status": "shadow"|"filled"|"partial"|"killed"|
                  "rejected"|"error", "filled": float, "avg_px": float|None,
-                 "order_id": str|None, "detail": str}. avg_px is the ALL-IN
-        cost per share received (making/taking), so the taker fee -- levied
-        in the output asset on this venue -- is already inside it.
+                 "order_id": str|None, "detail": str}. avg_px is
+        making/taking, the matched price per share. The venue charges the
+        0.07*p*(1-p) taker fee ON TOP of that, in collateral -- verified
+        to the cent against account activity on the first live fills --
+        so cost accounting must add the fee; making alone is not the cash
+        that leaves.
         In shadow mode the order is built and logged but never sent.
         `outcome` ("Up"/"Down") is log-only, for the divergence report.
         """

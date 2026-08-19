@@ -111,6 +111,17 @@ class Bot:
                 if cl.get_closed_only_mode():
                     raise SystemExit("account is in closed-only mode; "
                                      "refusing to start live")
+                # ALL order submissions ride ONE worker thread. The SDK's
+                # httpx transport multiplexes HTTP/2 streams over a single
+                # connection, and concurrent submissions from pool threads
+                # corrupted its stream table on launch day -- KeyError(23)
+                # and KeyError(25), consecutive client stream ids, two
+                # orders lost. Serialized orders cannot collide; ops
+                # traffic gets its own client in _live_ops_pass.
+                from concurrent.futures import ThreadPoolExecutor
+                self._order_pool = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="order")
+                self._ops_ex = None
         # Total delay before a taker order can match. `venue_hold_ms` is the
         # venue's own documented 250 ms hold on crypto up/down markets ("the
         # order is held for 250 ms, then validation runs again and the order
@@ -1177,7 +1188,7 @@ class Bot:
         loop = asyncio.get_running_loop()
         try:
             r = await loop.run_in_executor(
-                None, lambda: self.executor.submit_taker(
+                self._order_pool, lambda: self.executor.submit_taker(
                     token, "BUY", o["size"], o["limit"], slug=o["slug"],
                     outcome=o["side"]))
         except Exception as e:  # noqa: BLE001
@@ -1195,10 +1206,13 @@ class Bot:
             meta = dict(o["meta"])
             meta.update(requested=o["size"], live=True,
                         order_id=r.get("order_id"))
-            # fee_per_sh=0: making/taking is all-in (fee levied in the
-            # output asset), so the modelled fee must not be added again.
+            # The venue charges the 0.07*p*(1-p) taker fee ON TOP of the
+            # matched amount, in collateral: on the first live fills the
+            # account's cash out exceeded making_amount by exactly the
+            # fee ($9.91 vs 9.90, $5.12 vs 5.09). Let the broker add the
+            # modelled fee so booked cost matches the cash that left.
             self.broker.taker_fills(o["slug"], o["side"], [(px, filled)],
-                                    meta=meta, fee_per_sh=0.0)
+                                    meta=meta)
             mkt = self.state.markets.get(o["slug"])
             if mkt is not None:
                 mkt.claimed[o["side"]] += filled
@@ -1249,7 +1263,17 @@ class Bot:
                                    "err": repr(e)[:200]})
 
     def _live_ops_pass(self):
-        cl = self.executor.client
+        # Housekeeping runs on its OWN client, i.e. its own HTTP
+        # connection: a redemption's transaction wait must never queue an
+        # order behind it, and sharing the order client's HTTP/2
+        # connection across threads is what lost two orders to
+        # stream-table corruption on launch day.
+        if self._ops_ex is None:
+            from bot.live import LiveExecutor
+            self._ops_ex = LiveExecutor(
+                shadow=False,
+                log_path=os.path.join(self.logdir, "ops.jsonl"))
+        cl = self._ops_ex.client
         bal = None
         try:
             b = cl.get_balance_allowance(asset_type="COLLATERAL")
