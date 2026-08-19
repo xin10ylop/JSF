@@ -38,7 +38,21 @@ Description=JSF shadow/live executors, memory-isolated from the paper fleet
 [Slice]
 MemoryHigh=250M
 MemoryMax=350M
+# 5x the default sibling weight: under CPU contention (the 1-vCPU host
+# also runs the paper baseline, the recorder, and a neighbour project)
+# the kernel serves the money path first. The launch-day 1013
+# slow-consumer closes were the live bot losing exactly this race.
+CPUWeight=500
 UNIT
+
+# The daily edge check is a heavy pandas job at 02:30 UTC on the same
+# box the live bot trades from -- the worst possible collision. Off
+# during live operation; run src/tape_chainlink.py manually if a decay
+# row is wanted.
+systemctl disable --now jsf-edgecheck.timer 2>/dev/null || true
+# The recorder keeps running (its rtds capture feeds the bots' oracle
+# hole-repair) but at the lowest CPU priority of the family.
+systemctl set-property jsf-recorder.service CPUWeight=50 2>/dev/null || true
 
 cat > /etc/systemd/system/jsf-livebot@.service <<'UNIT'
 [Unit]
