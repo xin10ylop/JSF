@@ -79,17 +79,32 @@ class LiveExecutor:
                  "rejected"|"error", "filled": float, "detail": str}.
         In shadow mode the order is built and logged but never sent.
         """
+        # The SDK denominates BUY market orders in DOLLARS: amount is the
+        # spend, max_price caps the per-share price. shares*max_price
+        # therefore buys AT LEAST `shares` (more if the book is better,
+        # which is strictly good EV) and can never spend beyond the
+        # dollar figure -- the same quantity risk.max_market_dollars caps.
+        from decimal import Decimal, ROUND_DOWN
+        amount = (Decimal(str(shares)) * Decimal(str(max_price))
+                  ).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
         req = {"slug": slug, "token_id": str(token_id)[:16] + "...",
                "side": side, "shares": float(shares),
-               "max_price": float(max_price)}
+               "amount_usd": float(amount), "max_price": float(max_price)}
         if self.shadow:
             self._emit("shadow_order", **req)
             return {"status": "shadow", "filled": 0.0, "detail": "not sent"}
         try:
             r = self.client.place_market_order(
-                token_id=str(token_id), side=side, shares=shares,
+                token_id=str(token_id), side=side, amount=amount,
                 max_price=max_price, order_type="FAK")
         except Exception as e:  # noqa: BLE001
+            # An un-crossable FAK RAISES InsufficientLiquidityError rather
+            # than returning a killed order: that is the venue saying
+            # "nothing at your limit", i.e. normal FAK kill semantics.
+            if "InsufficientLiquidity" in repr(e):
+                self._emit("order_killed_no_liquidity", **req)
+                return {"status": "killed", "filled": 0.0,
+                        "detail": "no liquidity at limit (FAK kill)"}
             self._emit("order_error", err=repr(e)[:300], **req)
             return {"status": "error", "filled": 0.0,
                     "detail": repr(e)[:300]}
@@ -99,11 +114,18 @@ class LiveExecutor:
             return {"status": "rejected", "filled": 0.0,
                     "detail": f"{getattr(r, 'code', '')}: "
                               f"{getattr(r, 'message', '')}"}
-        filled = float(getattr(r, "making_amount", 0) or 0)
+        making = float(getattr(r, "making_amount", 0) or 0)
+        taking = float(getattr(r, "taking_amount", 0) or 0)
+        # For a BUY: making = collateral given, taking = shares received.
+        # The API sometimes reports raw 6-decimal units (the balance
+        # endpoint does); normalise heuristically until the first real
+        # fills pin it down -- the divergence report recalibrates anyway.
+        filled = taking
+        if filled > float(shares) * 1000:
+            filled = filled / 1e6
         self._emit("order_result", order_id=getattr(r, "order_id", None),
                    status=str(getattr(r, "status", "")),
-                   making=float(getattr(r, "making_amount", 0) or 0),
-                   taking=float(getattr(r, "taking_amount", 0) or 0), **req)
+                   making=making, taking=taking, **req)
         status = "filled" if filled >= float(shares) - 1e-9 else (
             "partial" if filled > 0 else "killed")
         return {"status": status, "filled": filled,

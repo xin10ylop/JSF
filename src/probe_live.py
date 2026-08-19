@@ -3,7 +3,7 @@
 Runs the exact ladder a real order climbs -- env key, L1/L2 auth from
 THIS host's IP, account not closed-only, balance visibility, V2 order
 build+sign -- and, with --send, submits a deliberately un-crossable
-5-share FAK BUY at 0.01 from the (unfunded) wallet. The classification
+FAK BUY with a $1.00 spend cap at max_price 0.01. The classification
 of the venue's answer is the point:
 
   balance/allowance rejection  -> FULL PASS: geo, auth, signing, order
@@ -15,9 +15,9 @@ of the venue's answer is the point:
   accepted-but-killed FAK      -> also a pass (order reached matching);
                                   possible only if the wallet has funds
 
-Safety: BUY at 0.01 cannot cross a real book (asks quote >= 0.02), FAK
-never rests, and the worst theoretical outcome with a funded wallet is
-5 shares x $0.01 = five cents.
+Safety: BUY capped at 0.01 cannot cross a real book (asks quote
+>= 0.02), FAK never rests, and the worst theoretical outcome with a
+funded wallet is the full $1.00 spend cap -- one dollar.
 
     python3 src/probe_live.py            # stops after signing (shadow)
     python3 src/probe_live.py --send     # submits the probe order
@@ -103,15 +103,26 @@ def main():
               "for the full $0 validation.")
         return
 
-    r = ex.submit_taker(token, "BUY", 5, 0.01, slug=slug)
+    # 100 shares at a 0.01 cap = a $1.00 spend ceiling that cannot cross
+    # any real book (asks quote >= 0.02): the venue must either kill the
+    # FAK for lack of liquidity at the limit (funded wallet -- the FULL
+    # PASS) or reject it for balance/allowance (unfunded -- also a pass:
+    # everything below money works).
+    r = ex.submit_taker(token, "BUY", 100, 0.01, slug=slug)
     d = (r.get("detail") or "").lower()
-    if r["status"] == "rejected" and any(
+    if r["status"] == "killed":
+        print(f"\n  [FULL PASS] order accepted and FAK-killed with nothing "
+              f"at the 0.01 limit: {r['detail']}")
+        print("  The ENTIRE live stack works end to end -- geo, auth, "
+              "signing, balance, matching. Zero dollars spent.")
+    elif r["status"] == "rejected" and any(
             w in d for w in ("balance", "allowance", "collateral", "fund")):
         print(f"\n  [FULL PASS] venue rejected ONLY for money: {r['detail']}")
         print("  Every layer below funding works from this host. "
               "Fund the wallet and this stack is live.")
-    elif r["status"] in ("killed", "filled", "partial"):
-        print(f"\n  [PASS] order reached matching: {r}")
+    elif r["status"] in ("filled", "partial"):
+        print(f"\n  [PASS] order reached matching and FILLED at <=0.01 "
+              f"(someone quoted a cent!): {r}")
     else:
         print(f"\n  [INVESTIGATE] {r['status']}: {r['detail'][:300]}")
 
