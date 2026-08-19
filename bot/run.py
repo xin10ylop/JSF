@@ -186,13 +186,15 @@ class Bot:
             return
         lines = chunk.split("\n")
         for line in (lines[1:] if size > 8 * 1024 * 1024 else lines):
-            if '"taker_fill"' not in line and '"maker_fill"' not in line:
+            if '"taker_fill"' not in line and '"maker_fill"' not in line \
+                    and '"fill_correction"' not in line:
                 continue
             try:
                 d = json.loads(line)
             except Exception:  # noqa: BLE001
                 continue
-            if d.get("kind") not in ("taker_fill", "maker_fill"):
+            if d.get("kind") not in ("taker_fill", "maker_fill",
+                                     "fill_correction"):
                 continue
             slug = d.get("slug", "")
             try:
@@ -202,11 +204,20 @@ class Bot:
                 continue
             if t1 <= now_s:
                 continue
+            pos = self.broker.positions.setdefault(
+                (slug, d.get("side")), {"shares": 0.0, "cost": 0.0})
+            if d.get("kind") == "fill_correction":
+                # venue-verified adjustment (see _fill_truth): replaying
+                # the raw fills without it would resurrect the corrupted
+                # booking the correction fixed
+                pos["shares"] = max(0.0, pos["shares"]
+                                    + float(d.get("d_sh", 0)))
+                pos["cost"] = max(0.0, pos["cost"]
+                                  + float(d.get("d_cost", 0)))
+                continue
             sh = float(d.get("shares", 0))
             px = float(d.get("px", 0))
             fee = float(d.get("fee_per_sh", 0))
-            pos = self.broker.positions.setdefault(
-                (slug, d.get("side")), {"shares": 0.0, "cost": 0.0})
             pos["shares"] += sh
             pos["cost"] += sh * (px + fee)
             n += 1
@@ -1526,6 +1537,14 @@ class Bot:
                     pos["shares"] = max(0.0, pos["shares"] + d_sh)
                     pos["cost"] = max(0.0, pos["cost"] + d_cost)
                     applied = True
+                    # The correction must survive a restart:
+                    # _replay_open_positions rebuilds from the fills
+                    # log, so an unlogged correction would silently
+                    # revert to the corrupted booking on redeploy.
+                    self.broker._emit("fill_correction", slug=slug,
+                                      side=side, d_sh=round(d_sh, 4),
+                                      d_cost=round(d_cost, 6),
+                                      order_id=str(order_id)[:24])
                 self.log_decision({
                     "kind": "fill_truth_CORRECTED" if applied
                             else "fill_truth_MISMATCH_POST_SETTLE",
