@@ -115,6 +115,8 @@ def wavg_px(fills):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=float, default=24.0)
+    ap.add_argument("--detail", action="store_true",
+                    help="per-market side-by-side rows for shared markets")
     a = ap.parse_args()
     since_us = int((time.time() - a.hours * 3600) * 1e6)
     cfg = json.load(open("bot/config.live.json"))
@@ -164,6 +166,16 @@ def main():
         else:
             print(f"  live({tag}): no fills")
         shared = set(paper) & set(live)
+        if shared and a.detail:
+            print("  --- shared markets, side by side "
+                  "(px = all-in per share) ---")
+            for k in sorted(shared):
+                pp = paper[k][1] / paper[k][0]
+                lp = live[k][1] / live[k][0]
+                print(f"    {k[0]:<28} {k[1]:<5} "
+                      f"paper {paper[k][0]:7.1f}sh @{pp:.4f}   "
+                      f"live {live[k][0]:6.1f}sh @{lp:.4f}   "
+                      f"diff {100 * (lp - pp):+.2f}c/sh")
         if shared:
             w = sum(min(paper[k][0], live[k][0]) for k in shared)
             diff = sum(min(paper[k][0], live[k][0])
