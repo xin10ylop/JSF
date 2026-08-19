@@ -17,6 +17,7 @@ printed, and this module never puts it in any string. Use a FRESH
 dedicated wallet funded only with the bot's bankroll.
 """
 import json
+import math
 import os
 import time
 
@@ -99,11 +100,28 @@ class LiveExecutor:
         # OUTSIDE the EIP-712 signature, so restamping the signed order
         # GTC->FAK is valid: it crosses at prices <= ours or dies, and
         # can never rest on the book.
-        sh = int(float(shares) * 100) / 100.0     # venue size: max 2dp
         px = round(float(max_price), 2)           # tick 0.01, static
+        c = int(round(px * 100))
+        # The venue demands the BUY makerAmount land on whole cents:
+        # size*price must have <= 2 decimals, so the allowed share step
+        # is 1/gcd(price_cents, 100) -- whole shares at 0.87 or 0.99,
+        # 0.1 at 0.90, 0.04 at 0.75. The SDK signs whatever size it is
+        # given; 16 fractional-size orders (7.24 sh x 0.87 = $6.2988)
+        # died to "maker max accuracy 2 decimals" in the first half hour
+        # of the limit path, all in the cheap-dip band. Round DOWN to
+        # the step: never oversize, lose at most one step of size.
+        step = 1.0 / math.gcd(c, 100)
+        sh = round(math.floor(float(shares) / step + 1e-9) * step, 2)
         req = {"slug": slug, "token_id": str(token_id)[:16] + "...",
                "side": side, "outcome": outcome, "shares": sh,
                "amount_usd": round(sh * px, 2), "max_price": px}
+        if sh < 5.0:
+            # quantization can drop a 5.x request below the venue's
+            # 5-share minimum; a $0 non-event, logged as its own kind
+            self._emit("order_skip_min_after_quantize", **req)
+            return {"status": "killed", "filled": 0.0, "avg_px": None,
+                    "order_id": None,
+                    "detail": "below venue min after size quantization"}
         if self.shadow:
             self._emit("shadow_order", **req)
             return {"status": "shadow", "filled": 0.0, "avg_px": None,
