@@ -65,9 +65,10 @@ class LiveExecutor:
             k = _key()
             funder = os.environ.get("POLYMARKET_FUNDER") or None
             self._client = SecureClient.create(private_key=k, wallet=funder)
+            # wallet / wallet_type are PROPERTIES on this SDK, not methods
             self._emit("client_ready",
-                       wallet=str(self._client.wallet()),
-                       wallet_type=str(self._client.wallet_type()),
+                       wallet=str(self._client.wallet),
+                       wallet_type=str(self._client.wallet_type),
                        closed_only=bool(self._client.get_closed_only_mode()))
         return self._client
 
