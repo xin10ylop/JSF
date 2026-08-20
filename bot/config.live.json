@@ -68,5 +68,17 @@
     "min_level": 0.05,
     "requote_c": 0.01,
     "_note": "MEASUREMENT ONLY -- simulated against real trade prints in an isolated ledger (maker_fills.jsonl / maker_sim_settled lines), never touching the real-money broker or risk. Rationale: 24h of live takers measured adverse fill selection (171 kills vs 14 fills; fills at avg 0.296 vs paper 0.857) -- the favourite's ask side empties in the final 30s, so the taker leg starves where the edge is largest. The maker leg rests a bid at fair-minus-3c on the favoured side, TTL 10s, cancel-and-replace, never resting into the final 3s. Maker fills on prints are the HONEST direction of simulation (prints are executed volume). If a few days measure it positive at meaningful volume, the real maker executor gets built."
+  },
+  "earlybird": {
+    "enabled": true,
+    "coins": [
+      "btc"
+    ],
+    "zmin": 0.3,
+    "size": 15,
+    "open_window_s": 45,
+    "max_price": 0.8,
+    "min_price": 0.3,
+    "_note": "At-open taker, hold to settlement. Proof-grade backtest 2026-08-20: 4,281 markets / 3 coins / 5.5 days; zmin 0.3 + fair>=ask filter = +6.1c/sh pooled (t=+2.96), btc +14.3c/sh (t=+3.07, 6/6 days positive), ~16 btc trades/day, capacity median 549 sh printed in the opening minute. Unfiltered variant measured NEGATIVE; entries >0.80 toxic; momentum predictors added nothing; hold beat all resting-sell exits. btc-only (eth +2.7c t=1.1 / sol +1.2c t=0.5 stay measurement-only). Live fair uses the empirical p_up calibration, slightly stricter than the backtest's gaussian -- conservative direction."
   }
 }

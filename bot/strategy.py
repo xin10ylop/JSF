@@ -411,3 +411,80 @@ class ZMaker:
                 "z": round(z, 2),
                 "reason": f"zmaker z={z:+.2f} fair_{side[0]} "
                           f"{fair_side:.3f} bid {level:.2f} rem {rem:.0f}s"}
+
+
+class EarlyBird:
+    """At-open taker: buy the model-favoured side in the first seconds of
+    a 5m market, hold to settlement.
+
+    Measured on 4,281 markets / 3 coins / 5.5 days at proof standard
+    (entries = first REAL trade after open + 1 tick + fee, outcomes =
+    venue resolutions): zmin 0.3 with the fair>=price filter reads
+    +6.1c/sh pooled (t=+2.96) and +14.3c/sh on btc (t=+3.07, 6/6 days
+    positive). Momentum predictors added nothing; hold beat every
+    resting-sell exit; entries above ~0.80 are toxic and are refused.
+
+    Why fills work HERE when the endgame starved: the opening minute
+    trades a median ~550 shares (prints-measured) in a two-sided book --
+    the emptiness this project fought lives only in the final ~30-60s.
+    The signal is the pre-window z: the strike is already ~formed at
+    open, the outcome window is all future, and the market's opening
+    quotes lag that math.
+
+    Fires only while `elapsed <= open_window_s` and only when the ask is
+    at or below the model's calibrated fair -- the unfiltered variant
+    measured NEGATIVE (-2.3c/sh); the filter is load-bearing, not
+    optional.
+    """
+
+    def __init__(self, cfg):
+        self.zmin = cfg.get("zmin", 0.3)
+        self.size = cfg.get("size", 15)
+        self.open_window_s = cfg.get("open_window_s", 45.0)
+        self.max_price = cfg.get("max_price", 0.80)
+        self.min_price = cfg.get("min_price", 0.30)
+        self.last_book = {}
+        self.f = {"eval": 0, "in_window": 0, "priced": 0, "z_pass": 0,
+                  "fired": 0}
+
+    def evaluate(self, state, m, t_us):
+        self.f["eval"] += 1
+        if m.t1_us - m.t0_us != 300_000_000:
+            return None                       # 5m family only (measured)
+        elapsed = (t_us - m.t0_us) / 1e6
+        if not (0 < elapsed <= self.open_window_s):
+            return None
+        self.f["in_window"] += 1
+        fv = state.fair(m, t_us)
+        z = state.zscore(m, t_us)
+        if fv is None or z is None:
+            return None
+        self.f["priced"] += 1
+        if abs(z) < self.zmin:
+            return None
+        self.f["z_pass"] += 1
+        side = "Up" if z > 0 else "Down"
+        if side == "Up":
+            ask, avail = m.best_ask()
+            stamp = m.book_us
+        else:
+            ask, avail, src = m.best_ask_dn()
+            stamp = m.book_dn_us if src == "book" else m.book_us
+        if ask is None or not (self.min_price <= ask <= self.max_price):
+            return None
+        fair_side = fv if side == "Up" else 1 - fv
+        if fair_side < ask:
+            return None                       # the load-bearing filter
+        if self.last_book.get((m.slug, side)) == stamp:
+            return None                       # same book state: no re-take
+        self.last_book[(m.slug, side)] = stamp
+        self.f["fired"] += 1
+        return {"action": "taker_buy", "side": side, "px": ask,
+                "avail": avail, "size": self.size,
+                "ev_est": round(fair_side - ask
+                                - 0.07 * ask * (1 - ask), 4),
+                "z": round(z, 2),
+                "oracle_age_s": round(state.oracle_age_s(), 2),
+                "reason": f"earlybird z={z:+.2f} fair_{side[0]} "
+                          f"{fair_side:.3f} vs ask {ask:.3f} "
+                          f"open+{elapsed:.0f}s"}

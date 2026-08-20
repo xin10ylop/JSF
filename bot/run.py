@@ -35,7 +35,7 @@ from bot.state import BotState, MarketState, now_us  # noqa: E402
 from bot.paper import PaperBroker  # noqa: E402
 from bot.risk import Risk  # noqa: E402
 from bot.strategy import (GzValueMaker, ExtremeTaker, VacuumLadder,  # noqa: E402
-                          RollAvgEdge, ZMaker)
+                          RollAvgEdge, ZMaker, EarlyBird)
 
 GAMMA = "https://gamma-api.polymarket.com/markets"
 CFG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -92,6 +92,12 @@ class Bot:
             self.strategies.append(GzValueMaker(cfg.get("gz_maker", {})))
         if cfg.get("extreme_taker", {}).get("enabled", False):
             self.strategies.append(ExtremeTaker(cfg.get("extreme_taker", {})))
+        eb = cfg.get("earlybird", {})
+        if eb.get("enabled", False) and self.coin in eb.get(
+                "coins", ["btc"]):
+            # coin-gated: the measured edge is btc-concentrated
+            # (+14.3c t=3.07 vs eth +2.7 t=1.1, sol +1.2 t=0.5)
+            self.strategies.append(EarlyBird(eb))
         # The maker leg runs as a MEASUREMENT: signals are simulated
         # against real trade prints in a fully ISOLATED ledger --
         # separate fills file, separate settle lines, never touching the
