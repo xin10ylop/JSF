@@ -1294,16 +1294,18 @@ class Bot:
             return
         ev = sig.get("ev_est")
         if ev is not None and ev < -0.10:
-            # Model and market disagreeing by >10c/share is not a
-            # signal, it is two inputs out of sync (stale oracle or
-            # stale book): the 0.99-vs-0.022 trade carried ev_est
-            # -0.196. Every validated profitable band prices within a
-            # few cents of empirical fair, so this guard costs none of
-            # the record -- it only refuses trades the strategy never
-            # meant to make.
-            self.log_decision({"kind": "blocked_divergence",
-                               "slug": m.slug, "side": sig["side"],
-                               "ev_est": round(ev, 4), "px": sig["px"]})
+            # Log once, then block re-evaluation briefly: every book
+            # tick re-fires the same conclusion (observed: 10 identical
+            # blocked_divergence lines in ~100ms).
+            if now >= self._refire_block.get((m.slug, sig["side"]), 0):
+                self.log_decision({"kind": "blocked_divergence",
+                                   "slug": m.slug, "side": sig["side"],
+                                   "ev_est": round(ev, 4),
+                                   "px": sig["px"]})
+            # (Model and market disagreeing by >10c/share is not a
+            # signal, it is two inputs out of sync -- stale oracle or
+            # stale book; the 0.99-vs-0.022 trade carried ev_est -0.196.)
+            self._refire_block[(m.slug, sig["side"])] = now + 3_000_000
             return
         o = {"slug": m.slug, "side": sig["side"], "limit": sig["px"],
              "size": float(size),
