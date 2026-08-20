@@ -485,8 +485,17 @@ class EarlyBird:
             return None                       # same book state: no re-take
         self.last_book[(m.slug, side)] = stamp
         self.f["fired"] += 1
+        # one_shot: the engine refuses this signal whenever the market
+        # already holds ANY shares on this side (booked or in flight).
+        # Without it, every book tick inside the open window re-fires and
+        # the risk caps let a partial fill top up at progressively worse
+        # prices -- an execution profile the +14.3c/sh measurement never
+        # contained (its entry is ONE trade at the first print). A clean
+        # kill leaves no position, so retrying within the window is still
+        # allowed -- which is exactly the measured "first print after
+        # open" semantics.
         return {"action": "taker_buy", "side": side, "px": ask,
-                "avail": avail, "size": self.size,
+                "avail": avail, "size": self.size, "one_shot": True,
                 "ev_est": round(fair_side - ask
                                 - 0.07 * ask * (1 - ask), 4),
                 "z": round(z, 2),

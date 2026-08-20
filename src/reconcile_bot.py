@@ -426,7 +426,8 @@ def main():
     bt.state.binance_us = _n()
     bt.strategies = [_OppStub()]
     bt.n_eval = bt.n_signal = bt.n_eval_err = 0
-    bt.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0}
+    bt.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0,
+                "size": 0}
     bt.latency_us = 5_000_000
     bt.pending = [{"slug": mo.slug, "side": "Up", "limit": 0.90,
                    "size": 50, "fire_us": _n() + 4_000_000, "meta": {}}]
@@ -439,6 +440,80 @@ def main():
         "guard now blocks even with nothing pending"
     bt.pending = []
     print("PASS: opposite-side guard covers orders still in flight")
+
+    # one_shot semantics (EarlyBird): ONE entry per market. A partial
+    # fill must not top up at a worse price (that execution profile was
+    # never measured), but a clean kill (zero shares, nothing queued)
+    # may retry inside the window -- the measured "first print after
+    # open" semantics.
+    class _OneShotStub:
+        def evaluate(self, state, m, t_us):
+            return {"action": "taker_buy", "side": "Up", "px": 0.90,
+                    "avail": 100.0, "size": 15, "one_shot": True,
+                    "reason": "earlybird stub"}
+    bt.strategies = [_OneShotStub()]
+    bt.broker.positions.pop((mo.slug, "Up"), None)
+    bt.broker.positions.pop((mo.slug, "Down"), None)
+    bt._try_market_inner(mo)                      # clean: fires
+    assert sum(1 for o in bt.pending if o["slug"] == mo.slug) == 1, \
+        "one_shot blocked a clean first entry"
+    bt._try_market_inner(mo)                      # in flight: blocked
+    assert sum(1 for o in bt.pending if o["slug"] == mo.slug) == 1, \
+        "one_shot re-fired over an order still in the queue"
+    bt.pending = []
+    bt.broker.positions[(mo.slug, "Up")] = {"shares": 9.0, "cost": 4.1}
+    bt._try_market_inner(mo)                      # partial fill: blocked
+    assert not bt.pending, \
+        "one_shot topped up a partially filled market"
+    bt.broker.positions.pop((mo.slug, "Up"), None)
+    bt._try_market_inner(mo)                      # killed order: retries
+    assert sum(1 for o in bt.pending if o["slug"] == mo.slug) == 1, \
+        "one_shot refused a retry after a no-fill kill"
+    bt.pending = []
+    print("PASS: one_shot -- no top-ups after fills, retries after kills")
+
+    # the event-driven eval path must cover the OPEN window when
+    # EarlyBird is registered (its edge lives in the first seconds; the
+    # 1 Hz safety net alone gives away the opening book race)
+    t_now = _n()
+    m_open = MarketState("open-5m", "up", t_now - 10_000_000,
+                         t_now + 290_000_000, asset_id_dn="dn2")
+    bt.state.markets[m_open.slug] = m_open
+    bt._open_eval_s = 0.0
+    n0 = bt.n_eval
+    bt._maybe_eval(m_open)                        # rem 290s, no open eval
+    assert bt.n_eval == n0, "evaluated outside settle window w/o opt-in"
+    bt._open_eval_s = 47.0
+    bt._maybe_eval(m_open)                        # elapsed 10s <= 47
+    assert bt.n_eval == n0 + 1, "open-window book event not evaluated"
+    m_open.t0_us = t_now - 60_000_000             # elapsed 60s > 47
+    bt._maybe_eval(m_open)
+    assert bt.n_eval == n0 + 1, "evaluated past the open window"
+    bt._open_eval_s = 0.0
+    bt.state.markets.pop(m_open.slug, None)
+    print("PASS: book events evaluate the open window only when opted in")
+
+    # the cash-floor day anchor must survive a restart: reload the day's
+    # FIRST anchor, not the post-drawdown balance a restart would see
+    import tempfile
+    bt.logdir = tempfile.mkdtemp(prefix="recon_anchor_")
+    old_dec = bt.decisions
+    bt.decisions = open(os.path.join(bt.logdir, "decisions.jsonl"), "a")
+    bt._day_bal_anchor = None
+    bt.log_decision({"kind": "day_anchor",
+                     "day": time.strftime("%Y-%m-%d", time.gmtime()),
+                     "bal": 93.5})
+    bt.log_decision({"kind": "day_anchor",
+                     "day": time.strftime("%Y-%m-%d", time.gmtime()),
+                     "bal": 60.0})                # later, post-loss
+    bt._seed_day_pnl()
+    bt.decisions.close()
+    bt.decisions = old_dec
+    assert bt._day_bal_anchor is not None \
+        and abs(bt._day_bal_anchor[1] - 93.5) < 1e-9, \
+        f"anchor reload took the wrong line: {bt._day_bal_anchor}"
+    print("PASS: cash-floor anchor survives restarts at the day's first "
+          "balance")
 
     # below the venue's own orderMinSize=5 we cannot send an order at all
     m2 = fresh([(0.90, 6.0)], participation=0.5)

@@ -93,11 +93,18 @@ class Bot:
         if cfg.get("extreme_taker", {}).get("enabled", False):
             self.strategies.append(ExtremeTaker(cfg.get("extreme_taker", {})))
         eb = cfg.get("earlybird", {})
+        self._open_eval_s = 0.0
         if eb.get("enabled", False) and self.coin in eb.get(
                 "coins", ["btc"]):
             # coin-gated: the measured edge is btc-concentrated
             # (+14.3c t=3.07 vs eth +2.7 t=1.1, sol +1.2 t=0.5)
             self.strategies.append(EarlyBird(eb))
+            # The event-driven eval path only covers the settle window;
+            # without this, EarlyBird sees the opening book at 1 Hz only
+            # (the safety-net loop) while its measured entry is the FIRST
+            # print after open. +2s slack so the last in-window book tick
+            # still evaluates; EarlyBird itself enforces the 45s gate.
+            self._open_eval_s = float(eb.get("open_window_s", 45.0)) + 2.0
         # The maker leg runs as a MEASUREMENT: signals are simulated
         # against real trade prints in a fully ISOLATED ledger --
         # separate fills file, separate settle lines, never touching the
@@ -170,7 +177,8 @@ class Bot:
         self.n_miss_why = {"ask_gone": 0, "too_small": 0, "no_market": 0}
         self.n_reject = 0          # venue rejected on re-validation
         self.n_partial = 0         # filled less than we asked for
-        self.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0}
+        self.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0,
+                      "size": 0}
         self.n_clob = 0        # counters surfaced in the health log so a
         self.n_clob_err = 0    # silently-stalled feed is visible at a glance
         self.n_clob_drop = 0   # queue-full drops: book desync until resync
@@ -266,14 +274,20 @@ class Bot:
         except OSError:
             return
         lines = chunk.split("\n")
+        anchor = None
         for line in (lines[1:] if size > 32 * 1024 * 1024 else lines):
-            if '"settled"' not in line and '"risk_state"' not in line:
+            if '"settled"' not in line and '"risk_state"' not in line \
+                    and '"day_anchor"' not in line:
                 continue
             try:
                 d = json.loads(line)
             except Exception:  # noqa: BLE001
                 continue
             if d.get("t_us", 0) < day_start_us:
+                continue
+            if d.get("kind") == "day_anchor":
+                if anchor is None:      # the day's FIRST anchor: the
+                    anchor = d          # balance before today's losses
                 continue
             if d.get("kind") == "risk_state":
                 last_state = d
@@ -284,6 +298,12 @@ class Bot:
             total += pnl
             if pnl != 0:
                 outcomes.append(pnl > 0)
+        if anchor is not None and hasattr(self, "_day_bal_anchor"):
+            self._day_bal_anchor = (anchor.get("day"),
+                                    float(anchor.get("bal", 0.0)))
+            self.log_decision({"kind": "day_anchor_reloaded",
+                               "day": anchor.get("day"),
+                               "bal": anchor.get("bal")})
         if outcomes or last_state:
             self.risk.seed(total, outcomes, logged=last_state)
             self.log_decision({"kind": "day_pnl_seeded",
@@ -1132,13 +1152,19 @@ class Bot:
         m.claimed[o["side"]] += got
 
     def _maybe_eval(self, m):
-        """Evaluate immediately if this market is inside its settle window."""
+        """Evaluate immediately inside the settle window -- and, when
+        EarlyBird is registered, inside the opening seconds too."""
         if m is None:
             return
         rem = (m.t1_us - now_us()) / 1e6
         self._process_pending()
         if 0 < rem <= m.w:
             self._try_market(m)
+            return
+        if self._open_eval_s:
+            elapsed = (now_us() - m.t0_us) / 1e6
+            if 0 < elapsed <= self._open_eval_s:
+                self._try_market(m)
 
     def _try_market(self, m):
         """Guarded wrapper: one market's failure must never stop the loop."""
@@ -1212,6 +1238,10 @@ class Bot:
                         if o["slug"] == m.slug and o["side"] == sig["side"])
             pos = {"shares": pos["shares"] + q_sh,
                    "cost": pos["cost"] + q_usd}
+            if sig.get("one_shot") and pos["shares"] > 0:
+                continue    # one entry per market for this strategy: a
+                            # partial fill must never top up at a worse
+                            # price (that profile was never measured)
             nmk = len({k[0] for k, v in self.broker.positions.items()
                        if v["shares"] > 0}
                       | {o["slug"] for o in self.pending + self.inflight})
@@ -1219,6 +1249,11 @@ class Bot:
             size = self.risk.size_ok(pos["shares"], pos["cost"],
                                      sig["size"], px, nmk)
             if size <= 0:
+                # Concurrency/cap starvation was SILENT: a signal sized to
+                # zero (e.g. two unsettled markets holding both concurrent
+                # slots at the next open) left no trace, which reads as
+                # "no signal" in a zero-trade postmortem. Count it.
+                self.n_rej["size"] += 1
                 continue
             self.n_signal += 1
             self.log_decision({"kind": "signal", "slug": m.slug,
@@ -1762,6 +1797,13 @@ class Bot:
             if self._day_bal_anchor is None \
                     or self._day_bal_anchor[0] != day:
                 self._day_bal_anchor = (day, bal)
+                # Persist: the anchor lived only in memory, so a restart
+                # after a losing stretch re-based the floor at the DRAINED
+                # balance -- each restart granted a fresh daily allowance
+                # below the money already lost. _seed_day_pnl reloads the
+                # day's FIRST anchor, so the floor survives redeploys.
+                self.log_decision({"kind": "day_anchor", "day": day,
+                                   "bal": bal})
             floor = (self._day_bal_anchor[1]
                      - abs(self.risk.daily_loss_limit)
                      - self.risk.max_concurrent
