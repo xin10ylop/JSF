@@ -1527,6 +1527,11 @@ class Bot:
         oid_found = None
         for delay in (4.0, 8.0, 15.0, 30.0):
             time.sleep(delay)
+            # Reset per pass: an exception mid-iteration after partial
+            # accumulation would otherwise re-add the same trade rows on
+            # the next pass and over-book the fill.
+            found_sh, found_cost, found_px = 0.0, 0.0, None
+            oid_found = None
             try:
                 n_seen = 0
                 for tr in self._ops_client().list_account_trades(
