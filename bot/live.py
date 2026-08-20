@@ -214,5 +214,21 @@ class LiveExecutor:
                    making=making, taking=taking, avg_px=avg_px, **req)
         status = "filled" if filled >= float(sh) - 1e-9 else (
             "partial" if filled > 0 else "killed")
+        if status == "killed":
+            # "killed" is the ONE outcome the caller trusts blindly (no
+            # refire block, no trade-record verification, retry allowed)
+            # -- but this same response object is documented to lie
+            # about amounts under the async pipeline (echoed 15 @ 0.99
+            # vs actual 393 @ 0.025). A zero parsed amount with a
+            # matched status or trade ids attached is NOT a proven kill:
+            # hand it to the pending path so the caller blocks re-fires
+            # and verifies against venue trade records. A genuine FAK
+            # kill has neither.
+            tids = list(getattr(r, "trade_ids", ()) or ())
+            if tids or st_venue == "matched":
+                return {"status": "pending", "filled": 0.0,
+                        "avg_px": None, "order_id": oid,
+                        "detail": f"zero-amount but status="
+                                  f"{st_venue} trade_ids={len(tids)}"}
         return {"status": status, "filled": filled, "avg_px": avg_px,
                 "order_id": oid, "detail": str(getattr(r, "status", ""))}

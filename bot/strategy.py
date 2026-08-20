@@ -441,6 +441,11 @@ class EarlyBird:
         self.zmin = cfg.get("zmin", 0.3)
         self.size = cfg.get("size", 15)
         self.open_window_s = cfg.get("open_window_s", 45.0)
+        # The strike does not LATCH until ~3.5s after open (oracle rounds
+        # arrive 1.6-2.8s behind their stamps), so an evaluation in the
+        # first seconds prices off a K missing its final ticks. The
+        # backtest's z used the complete strike; wait for it.
+        self.min_open_s = cfg.get("min_open_s", 4.0)
         self.max_price = cfg.get("max_price", 0.80)
         self.min_price = cfg.get("min_price", 0.30)
         self.last_book = {}
@@ -452,7 +457,7 @@ class EarlyBird:
         if m.t1_us - m.t0_us != 300_000_000:
             return None                       # 5m family only (measured)
         elapsed = (t_us - m.t0_us) / 1e6
-        if not (0 < elapsed <= self.open_window_s):
+        if not (self.min_open_s <= elapsed <= self.open_window_s):
             return None
         self.f["in_window"] += 1
         z = state.zscore(m, t_us)

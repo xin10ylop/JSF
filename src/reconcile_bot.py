@@ -427,7 +427,7 @@ def main():
     bt.strategies = [_OppStub()]
     bt.n_eval = bt.n_signal = bt.n_eval_err = 0
     bt.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0,
-                "size": 0}
+                "size": 0, "one_shot": 0}
     bt.latency_us = 5_000_000
     bt.pending = [{"slug": mo.slug, "side": "Up", "limit": 0.90,
                    "size": 50, "fire_us": _n() + 4_000_000, "meta": {}}]

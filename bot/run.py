@@ -22,6 +22,7 @@ Run: python3 bot/run.py --coin btc                      (paper)
 import asyncio
 import json
 import random
+import threading
 import time
 
 import aiohttp
@@ -39,6 +40,8 @@ from bot.strategy import (GzValueMaker, ExtremeTaker, VacuumLadder,  # noqa: E40
 
 GAMMA = "https://gamma-api.polymarket.com/markets"
 CFG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+_LOG_LOCK = threading.Lock()   # decision-log writes come from several
+                               # threads; one bot per process (flock)
 
 
 LOCAL_CFG_PATH = os.path.join(os.path.dirname(__file__), "config.local.json")
@@ -152,7 +155,8 @@ class Bot:
                 # re-firing there is the double-fill path.
                 self._refire_block = {}
                 self._backoff_until = 0     # venue 429/post-only pause
-                self._prewarmed = set()     # slugs with warm SDK metadata
+                self._prewarmed = {}   # slug -> warmed-at us (re-warm
+                                       # after the ~10min SDK cache TTL)
                 self._settle_verify = []    # (slug, our_result, due_us)
                 self._day_bal_anchor = None  # (utc_day, balance at start)
                 self._booked_oids = set()   # order_ids whose venue trades
@@ -178,7 +182,7 @@ class Bot:
         self.n_reject = 0          # venue rejected on re-validation
         self.n_partial = 0         # filled less than we asked for
         self.n_rej = {"binance": 0, "oracle": 0, "book": 0, "killed": 0,
-                      "size": 0}
+                      "size": 0, "one_shot": 0}
         self.n_clob = 0        # counters surfaced in the health log so a
         self.n_clob_err = 0    # silently-stalled feed is visible at a glance
         self.n_clob_drop = 0   # queue-full drops: book desync until resync
@@ -323,9 +327,15 @@ class Bot:
             obj["mode"] = self.mode   # lets reports split shadow-era from
                                       # live-era lines in the same file
         try:
-            self.decisions.write(json.dumps(obj, separators=(",", ":"))
-                                 + "\n")
-            self.decisions.flush()
+            # Serialized: the event loop, the ops executor and the
+            # fill-truth threads all write this handle; interleaved
+            # writes tear lines, and a torn day_anchor line fails
+            # json.loads on the next restart as silently as ENOSPC.
+            # (module-level lock: one bot per process, per-coin flock)
+            with _LOG_LOCK:
+                self.decisions.write(json.dumps(obj, separators=(",", ":"))
+                                     + "\n")
+                self.decisions.flush()
         except OSError:
             # ENOSPC etc. A failed log write must degrade the RECORD, not
             # kill the process: an unguarded raise here turned a full disk
@@ -1114,6 +1124,12 @@ class Bot:
         # pre-window minutes of flow certify claims made in its last 60s,
         # a ~5x dilution of the cap this exists to be.
         win_start_us = m.t1_us - int(m.w * 1e6)
+        if now_us() < win_start_us:
+            # Open-window order (EarlyBird's paper leg): the settle
+            # window is still in the FUTURE, so printed() over it is
+            # zero by construction and every order died as too_small.
+            # Cap by the flow that actually printed since the open.
+            win_start_us = m.t0_us
         cap_life = (f["vol_participation"]
                     * m.printed(o["side"], o["limit"], win_start_us)
                     - m.claimed[o["side"]])
@@ -1226,7 +1242,12 @@ class Bot:
             if (self.broker.positions.get((m.slug, other),
                                           {}).get("shares", 0) > 0
                     or any(o["slug"] == m.slug and o["side"] == other
-                           for o in self.pending + self.inflight)):
+                           for o in self.pending + self.inflight)
+                    # an unresolved (pending/unknown) order leaves
+                    # inflight before its fate is known; its refire
+                    # block is the only trace -- and it is exposure
+                    or getattr(self, "_refire_block", {}).get(
+                        (m.slug, other), 0) > now_us()):
                 self.log_decision({"kind": "blocked_opposite_side",
                                    "slug": m.slug, "side": sig["side"],
                                    "holding": other})
@@ -1246,9 +1267,14 @@ class Bot:
             pos = {"shares": pos["shares"] + q_sh,
                    "cost": pos["cost"] + q_usd}
             if sig.get("one_shot") and pos["shares"] > 0:
-                continue    # one entry per market for this strategy: a
-                            # partial fill must never top up at a worse
-                            # price (that profile was never measured)
+                # one entry per market for this strategy: a partial fill
+                # must never top up at a worse price (that profile was
+                # never measured). Counted, not silent: the funnel's
+                # `fired` keeps growing while the position is held, and
+                # a zero-trade postmortem must be able to tell healthy
+                # suppression from breakage.
+                self.n_rej["one_shot"] += 1
+                continue
             nmk = len({k[0] for k, v in self.broker.positions.items()
                        if v["shares"] > 0}
                       | {o["slug"] for o in self.pending + self.inflight})
@@ -1542,6 +1568,11 @@ class Bot:
             # book a partial view of the fill.
             t_sh, t_cost, t_px = 0.0, 0.0, None
             t_oids = set()
+            # ok_pass tracks the LAST pass only: one clean-but-early
+            # empty poll must not convert later total failure into a
+            # confident "no fill" (trade rows lag; the +4s look is the
+            # least trustworthy of the four).
+            ok_pass = False
             try:
                 n_seen = 0
                 for tr in self._ops_client().list_account_trades(
@@ -1673,13 +1704,21 @@ class Bot:
         loop = asyncio.get_running_loop()
         for m in list(self.state.markets.values()):
             rem = (m.t1_us - now) / 1e6
-            # warm EVERY known market (rem<=1000 covers 15m too), not
-            # just the endgame: EarlyBird's first order lands seconds
-            # after OPEN, and a cold metadata cache would put two
-            # blocking GETs back into exactly that order
-            if not (0 < rem <= 1000) or m.slug in self._prewarmed:
+            # warm EVERY known market, not just the endgame: EarlyBird's
+            # first order lands seconds after OPEN, and a cold metadata
+            # cache would put two blocking GETs back into exactly that
+            # order. The cache TTL is ~10min, shorter than a 15m
+            # market's life -- so RE-warm when the first warm has aged
+            # past ~450s and a firing window is near (rem<=150), instead
+            # of once-per-slug forever.
+            if not (0 < rem <= 1000):
                 continue
-            self._prewarmed.add(m.slug)
+            warmed_at = self._prewarmed.get(m.slug)
+            if warmed_at is not None:
+                age_s = (now - warmed_at) / 1e6
+                if age_s < 450 or rem > 150:
+                    continue
+            self._prewarmed[m.slug] = now
             for tok in (m.asset_id_up, m.asset_id_dn):
                 if not tok:
                     continue

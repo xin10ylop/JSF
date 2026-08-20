@@ -891,6 +891,13 @@ class BotState:
         sigma = srel * spot
         rem = T - t
         if t <= T - m.w:
+            # Same stale-spot guard as the settle branch: EarlyBird's
+            # Phi(z) consumes this branch directly (it deliberately does
+            # not call fair(), which carried the guard), and a 20s-old
+            # oracle round at market open is a fake margin exactly like
+            # in the endgame.
+            if not self._spot_fresh() and self.oracle_age_s() > SPOT_MAX_AGE_S:
+                return None
             s = max((T - m.w) - t, 0.0)
             sd = sigma * ((s + m.w / 3.0) ** 0.5)
             return (spot - K) / sd if sd > 0 else None
