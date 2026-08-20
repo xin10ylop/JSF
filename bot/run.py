@@ -131,6 +131,8 @@ class Bot:
                 self._prewarmed = set()     # slugs with warm SDK metadata
                 self._settle_verify = []    # (slug, our_result, due_us)
                 self._day_bal_anchor = None  # (utc_day, balance at start)
+                self._booked_oids = set()   # order_ids whose venue trades
+                                            # are booked (or being booked)
         self._loop = None                    # set in main()
         # Total delay before a taker order can match. `venue_hold_ms` is the
         # venue's own documented 250 ms hold on crypto up/down markets ("the
@@ -769,22 +771,49 @@ class Bot:
                         (slug, result, now_us() + 180_000_000))
                 self.pending_settle.pop(slug, None)
             elif now_us() > m.t1_us + give_up_s * 1_000_000:
-                # Free the concurrency slot. An unscored position
-                # left in broker.positions counts toward
-                # max_concurrent_markets FOREVER -- four of these
-                # over a long run and the bot stops trading
-                # entirely. The fills stay in paper_fills.jsonl,
-                # and src/score_paper.py scores them independently
-                # off Gamma, so dropping the in-memory entry loses
-                # nothing but the stuck slot.
-                for k in [k for k in self.broker.positions
-                          if k[0] == slug]:
-                    self.broker.positions.pop(k, None)
-                self.log_decision({"kind": "settle_FAILED",
-                                   "slug": slug,
-                                   "note": "position unscored here; "
-                                           "slot freed, scorer will "
-                                           "still see the fills"})
+                if self.mode == "live":
+                    # A LIVE market still unresolved after an hour is,
+                    # in practice, the venue's voided-market remedy:
+                    # shares redeem at $0.50 (gamma reports mid
+                    # outcomePrices, which _gamma_result deliberately
+                    # returns None for). The old path popped the
+                    # position with NO pnl -- real money leaking out of
+                    # the risk accounting entirely. Book the venue's
+                    # remedy and feed the halt ladder.
+                    pnl = 0.0
+                    for k in [k for k in self.broker.positions
+                              if k[0] == slug]:
+                        pos = self.broker.positions.pop(k)
+                        payoff = pos["shares"] * 0.5
+                        pnl += payoff - pos["cost"]
+                        self.broker._emit(
+                            "settle", slug=slug, side=k[1],
+                            shares=pos["shares"], cost=pos["cost"],
+                            payoff=payoff, won=None)
+                    self.on_market_settled(pnl)
+                    self.log_decision({"kind": "settled", "slug": slug,
+                                       "result": None,
+                                       "pnl": round(pnl, 4),
+                                       "src": "voided_0.5",
+                                       "note": "unresolved 1h after "
+                                               "close; booked at the "
+                                               "void remedy 0.50/sh"})
+                else:
+                    # Paper: free the concurrency slot. An unscored
+                    # position left in broker.positions counts toward
+                    # max_concurrent_markets FOREVER -- four of these
+                    # and the bot stops trading entirely. The fills
+                    # stay in paper_fills.jsonl and score_paper.py
+                    # scores them independently off Gamma, so dropping
+                    # the in-memory entry loses only the stuck slot.
+                    for k in [k for k in self.broker.positions
+                              if k[0] == slug]:
+                        self.broker.positions.pop(k, None)
+                    self.log_decision({"kind": "settle_FAILED",
+                                       "slug": slug,
+                                       "note": "position unscored here; "
+                                               "slot freed, scorer will "
+                                               "still see the fills"})
                 self.pending_settle.pop(slug, None)
 
     def on_market_settled(self, pnl):
@@ -1337,6 +1366,7 @@ class Bot:
                 # and bookings drive the risk engine, so they must match
                 # reality. _fill_truth corrects the open position when
                 # they differ.
+                self._booked_oids.add(str(r.get("order_id")))
                 loop.run_in_executor(None, self._fill_truth,
                                      r.get("order_id"), o["slug"],
                                      o["side"], token, px, filled)
@@ -1349,11 +1379,18 @@ class Bot:
                                "why": "live_fak_killed"})
         elif st in ("pending", "unknown"):
             # Venue may still execute this order (collateral reserved; a
-            # dropped connection does not stop it). Block this
-            # (slug,side) long enough to resolve; the 5-min balance
-            # sweep arbitrates what actually happened.
+            # dropped connection does not stop it). Block re-fires on
+            # this (slug,side) until its fate is KNOWN -- a fixed short
+            # block was a double-fill path (order fills at t+3s, block
+            # expires at t+10s, same signal re-fires and doubles the
+            # position while the unbooked half stays invisible to risk)
+            # -- and RECONCILE: _resolve_unknown polls the venue's own
+            # trade records and books whatever actually happened.
             self._refire_block[(o["slug"], o["side"])] = \
-                now_us() + 10_000_000
+                now_us() + 90_000_000
+            loop.run_in_executor(None, self._resolve_unknown,
+                                 r.get("order_id"), o["slug"], o["side"],
+                                 token)
             self.log_decision({"kind": f"live_{st}", "slug": o["slug"],
                                "side": o["side"],
                                "order_id": r.get("order_id"),
@@ -1380,9 +1417,90 @@ class Bot:
                                "side": o["side"],
                                "detail": (r.get("detail") or "")[:200]})
         else:
+            # A hard error still gets a short block: firing again into
+            # whatever broke the last submission rarely helps within a
+            # couple of seconds, and the storm variant spams the log.
+            self._refire_block[(o["slug"], o["side"])] = \
+                now_us() + 3_000_000
             self.log_decision({"kind": "live_order_error", "slug": o["slug"],
                                "side": o["side"],
                                "detail": (r.get("detail") or "")[:200]})
+
+    def _resolve_unknown(self, order_id, slug, side, token):
+        """An order whose outcome was non-terminal (venue 'delayed' /
+        'live', a timeout, a dropped connection) may STILL have traded:
+        collateral was reserved and the venue finishes processing on its
+        own. Poll the venue's trade records until the fate is known and
+        book whatever actually happened -- an unbooked fill is invisible
+        to the risk engine, the daily stop, and the opposite-side guard,
+        and its (slug,side) block must not lift until this resolves.
+
+        With an order_id, trades join on taker_order_id. Without one
+        (transport error before a response), any recent trade on this
+        token whose taker_order_id is not already booked is claimed --
+        our orders are serialized, so an unattributed fresh trade on the
+        token we just targeted is ours."""
+        found_sh, found_cost, found_px = 0.0, 0.0, None
+        oid_found = None
+        for delay in (4.0, 8.0, 15.0, 30.0):
+            time.sleep(delay)
+            try:
+                n_seen = 0
+                for tr in self._ops_client().list_account_trades(
+                        token_id=str(token)):
+                    n_seen += 1
+                    if n_seen > 60:
+                        break
+                    t_oid = str(getattr(tr, "taker_order_id", ""))
+                    if order_id is not None:
+                        if t_oid != str(order_id):
+                            continue
+                    else:
+                        if t_oid in self._booked_oids:
+                            continue
+                        age = time.time() - getattr(
+                            tr, "matched_at").timestamp()
+                        if age > 180:
+                            continue
+                    if "FAIL" in str(getattr(tr, "status", "")).upper():
+                        continue
+                    p = float(tr.price)
+                    s = float(tr.size)
+                    found_sh += s
+                    found_cost += s * (p + 0.07 * p * (1 - p))
+                    found_px = p
+                    oid_found = t_oid
+                if found_sh > 0:
+                    break
+            except Exception as e:  # noqa: BLE001
+                self.log_decision({"kind": "resolve_unknown_err",
+                                   "slug": slug, "err": repr(e)[:150]})
+        def _apply():
+            if found_sh > 0:
+                if oid_found:
+                    self._booked_oids.add(oid_found)
+                px_eff = found_cost / found_sh
+                self.broker.taker_fills(
+                    slug, side, [(found_px or px_eff, found_sh)],
+                    meta={"live": True, "resolved_from": "pending",
+                          "order_id": str(order_id or oid_found)[:24]},
+                    fee_per_sh=(found_cost / found_sh
+                                - (found_px or px_eff)))
+                mkt = self.state.markets.get(slug)
+                if mkt is not None:
+                    mkt.claimed[side] += found_sh
+                self.log_decision({"kind": "unknown_order_FILLED",
+                                   "slug": slug, "side": side,
+                                   "sh": round(found_sh, 2),
+                                   "cost": round(found_cost, 4)})
+            else:
+                self.log_decision({"kind": "unknown_order_no_fill",
+                                   "slug": slug, "side": side,
+                                   "order_id": str(order_id)[:24]})
+            # fate known either way: lift the block
+            self._refire_block.pop((slug, side), None)
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(_apply)
 
     async def live_keepalive_loop(self):
         """Keep the ORDER client's connection hot.
@@ -1479,88 +1597,93 @@ class Bot:
 
     def _fill_truth(self, order_id, slug, side, token, booked_px,
                     booked_sh):
-        """Verify a booked fill against the venue's own trade records
-        (~4s later, on the ops client), and CORRECT the open position
-        when they differ.
+        """Reconcile a booked fill against the venue's own trade records
+        and CORRECT the open position whenever they differ.
 
         The order response is not authoritative: under the async commit
         pipeline it can echo the order (full size at exactly the limit)
         while the real trades executed at other sizes and prices --
         observed live as a booked 15 sh @ 0.99 whose actual trades were
-        393 sh @ ~0.025. Bookings feed the risk engine and the daily
-        stop, so they are reconciled to ClobTrade rows (joined on
-        taker_order_id), skipping trades whose status is FAILED."""
-        time.sleep(4.0)
-        try:
-            true_sh, true_cost = 0.0, 0.0
-            statuses = []
-            pager = self._ops_client().list_account_trades(
-                token_id=str(token))
-            n_seen = 0
-            for tr in pager:
-                n_seen += 1
-                if n_seen > 100:
-                    break
-                if str(getattr(tr, "taker_order_id", "")) != str(order_id):
+        393 sh @ ~0.025. It checks at +4s, +12s, +30s and +90s (NOT
+        single-shot: trade-row visibility lags the same async pipeline,
+        and a trade shown MATCHED early can resolve FAILED later), each
+        time correcting toward the venue's absolute truth. Bookings
+        feed the risk engine and the daily stop; they must match cash."""
+        applied_sh = booked_sh
+        applied_cost = booked_sh * (booked_px
+                                    + 0.07 * booked_px * (1 - booked_px))
+        seen_any = False
+        diverged = False
+        for delay in (4.0, 8.0, 18.0, 60.0):
+            time.sleep(delay)
+            try:
+                true_sh, true_cost = 0.0, 0.0
+                statuses = []
+                n_seen = 0
+                for tr in self._ops_client().list_account_trades(
+                        token_id=str(token)):
+                    n_seen += 1
+                    if n_seen > 100:
+                        break
+                    if str(getattr(tr, "taker_order_id", "")) \
+                            != str(order_id):
+                        continue
+                    stt = str(getattr(tr, "status", "")).upper()
+                    statuses.append(stt)
+                    if "FAIL" in stt:
+                        continue
+                    p = float(tr.price)
+                    s = float(tr.size)
+                    true_sh += s
+                    true_cost += s * (p + 0.07 * p * (1 - p))
+                if not statuses:
+                    continue        # rows not visible yet; retry
+                seen_any = True
+                d_sh = true_sh - applied_sh
+                d_cost = true_cost - applied_cost
+                if abs(d_sh) < 0.01 and abs(d_cost) < 0.02:
                     continue
-                stt = str(getattr(tr, "status", "")).upper()
-                statuses.append(stt)
-                if "FAIL" in stt:
-                    continue
-                p = float(tr.price)
-                s = float(tr.size)
-                true_sh += s
-                true_cost += s * (p + 0.07 * p * (1 - p))
-            booked_cost = booked_sh * (booked_px
-                                       + 0.07 * booked_px * (1 - booked_px))
-            if not statuses:
-                self.log_decision({"kind": "fill_truth_missing",
-                                   "slug": slug, "side": side,
+                diverged = True
+                applied_sh, applied_cost = true_sh, true_cost
+
+                def _apply(d_sh=d_sh, d_cost=d_cost, true_sh=true_sh,
+                           true_cost=true_cost, statuses=list(statuses)):
+                    pos = self.broker.positions.get((slug, side))
+                    applied = False
+                    if pos is not None and pos.get("shares", 0) > 0:
+                        pos["shares"] = max(0.0, pos["shares"] + d_sh)
+                        pos["cost"] = max(0.0, pos["cost"] + d_cost)
+                        applied = True
+                        # Corrections must survive restarts: the replay
+                        # rebuilds from the fills log, so an unlogged
+                        # correction would revert on redeploy.
+                        self.broker._emit("fill_correction", slug=slug,
+                                          side=side, d_sh=round(d_sh, 4),
+                                          d_cost=round(d_cost, 6),
+                                          order_id=str(order_id)[:24])
+                    self.log_decision({
+                        "kind": "fill_truth_CORRECTED" if applied
+                                else "fill_truth_MISMATCH_POST_SETTLE",
+                        "slug": slug, "side": side,
+                        "order_id": str(order_id)[:24],
+                        "venue": {"sh": round(true_sh, 2),
+                                  "cost": round(true_cost, 4),
+                                  "statuses": statuses[:6]}})
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(_apply)
+            except Exception as e:  # noqa: BLE001
+                self.log_decision({"kind": "fill_truth_err",
                                    "order_id": str(order_id)[:24],
-                                   "note": "no venue trades found for "
-                                           "this order yet"})
-                return
-            d_sh = true_sh - booked_sh
-            d_cost = true_cost - booked_cost
-            if abs(d_sh) < 0.01 and abs(d_cost) < 0.02:
-                self.log_decision({"kind": "fill_truth_ok", "slug": slug,
-                                   "side": side, "sh": round(true_sh, 2)})
-                return
-            # Correct the position on the event loop (the broker is a
-            # loop-owned object); if the market already settled the
-            # position is gone and the mismatch is logged for the
-            # morning reconciliation instead.
-            def _apply():
-                pos = self.broker.positions.get((slug, side))
-                applied = False
-                if pos is not None and pos.get("shares", 0) > 0:
-                    pos["shares"] = max(0.0, pos["shares"] + d_sh)
-                    pos["cost"] = max(0.0, pos["cost"] + d_cost)
-                    applied = True
-                    # The correction must survive a restart:
-                    # _replay_open_positions rebuilds from the fills
-                    # log, so an unlogged correction would silently
-                    # revert to the corrupted booking on redeploy.
-                    self.broker._emit("fill_correction", slug=slug,
-                                      side=side, d_sh=round(d_sh, 4),
-                                      d_cost=round(d_cost, 6),
-                                      order_id=str(order_id)[:24])
-                self.log_decision({
-                    "kind": "fill_truth_CORRECTED" if applied
-                            else "fill_truth_MISMATCH_POST_SETTLE",
-                    "slug": slug, "side": side,
-                    "order_id": str(order_id)[:24],
-                    "booked": {"sh": round(booked_sh, 2),
-                               "cost": round(booked_cost, 4)},
-                    "venue": {"sh": round(true_sh, 2),
-                              "cost": round(true_cost, 4),
-                              "statuses": statuses[:6]}})
-            if self._loop is not None:
-                self._loop.call_soon_threadsafe(_apply)
-        except Exception as e:  # noqa: BLE001
-            self.log_decision({"kind": "fill_truth_err",
+                                   "err": repr(e)[:150]})
+        if not seen_any:
+            self.log_decision({"kind": "fill_truth_missing",
+                               "slug": slug, "side": side,
                                "order_id": str(order_id)[:24],
-                               "err": repr(e)[:150]})
+                               "note": "no venue trade rows in 2 minutes;"
+                                       " booking stands UNVERIFIED"})
+        elif not diverged:
+            self.log_decision({"kind": "fill_truth_ok", "slug": slug,
+                               "side": side, "sh": round(applied_sh, 2)})
 
     def _live_ops_pass(self):
         cl = self._ops_client()
