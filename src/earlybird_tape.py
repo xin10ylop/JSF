@@ -43,6 +43,42 @@ from bot.state import COINS           # noqa: E402
 
 GAMMA = "https://gamma-api.polymarket.com/markets"
 CLOB = "https://clob.polymarket.com/prices-history"
+DATA = "https://data-api.polymarket.com/trades"
+
+
+def fetch_prints(condition_id, token_up, t_from, t_to):
+    """Real executed trades for one market, in Up-token terms, sorted by
+    time. A print IS proof of a tradeable price: entries priced off the
+    first print AFTER the decision moment cannot look back at stale
+    quotes, and a later print through a resting level is the same
+    price-priority fill proof the maker sim uses."""
+    out = []
+    try:
+        arr = get(f"{DATA}?market={condition_id}&limit=1000")
+        for tr in arr or []:
+            ts = tr.get("timestamp") or tr.get("time") or 0
+            ts = int(ts)
+            if ts > 10 ** 12:
+                ts //= 1000
+            if not (t_from <= ts <= t_to):
+                continue
+            p = float(tr.get("price", 0))
+            if not (0 < p < 1):
+                continue
+            asset = str(tr.get("asset") or tr.get("asset_id") or "")
+            outcome = str(tr.get("outcome") or "")
+            if asset and asset == str(token_up):
+                up_px = p
+            elif outcome.lower() == "up":
+                up_px = p
+            elif outcome.lower() == "down" or asset:
+                up_px = 1 - p
+            else:
+                up_px = p
+            out.append((ts, up_px))
+    except Exception:  # noqa: BLE001
+        pass
+    return sorted(out)
 
 
 def get(url):
@@ -110,6 +146,13 @@ def main():
     ap.add_argument("--edge-min", type=float, default=0.03)
     ap.add_argument("--max-entry", type=float, default=0.85)
     ap.add_argument("--min-entry", type=float, default=0.15)
+    ap.add_argument("--entry", default="prints",
+                    choices=["prints", "history"],
+                    help="prints (default): entry = first REAL trade "
+                         "executed after the decision moment, exits "
+                         "proven by later prints -- no stale-quote "
+                         "look-back. history: 1m price buckets (the "
+                         "original, optimistic on trending entries)")
     a = ap.parse_args()
     step = 300 if a.fam == "5m" else 900
     sym = COINS[a.coin]["oracle"]
@@ -145,7 +188,10 @@ def main():
                    for x in h.get("history", [])]
             if len(pts) < 3:
                 continue
-            markets.append((t0, v > 0.5, pts))
+            prints = fetch_prints(mk.get("conditionId"), toks[0],
+                                  t0 - 60, t0 + step) \
+                if a.entry == "prints" else []
+            markets.append((t0, v > 0.5, pts, prints))
         except Exception:  # noqa: BLE001
             continue
         time.sleep(0.12)
@@ -167,7 +213,8 @@ def main():
         z = (spot - K) / (sr * spot * math.sqrt(s + a.w / 3))
         return z, float(p_up(z))
 
-    header = (f"{'rem':>4} {'zmin':>4} {'sell@':>5} {'n':>4} "
+    header = (f"[entry mode: {a.entry}]\n"
+              f"{'rem':>4} {'zmin':>4} {'sell@':>5} {'n':>4} "
               f"{'EV_c/sh':>8} {'sold%':>6} {'win%':>6} {'avg_in':>7} "
               f"{'$/day@15sh':>10}")
     print(header)
@@ -177,17 +224,30 @@ def main():
             for sell_at in (0.97, 0.99):
                 n = wins = sells = 0
                 ev_sum = cost_sum = 0.0
-                for t0, up_won, pts in markets:
+                for t0, up_won, pts, prints in markets:
                     te = t0 + step - rem
                     z, fair = z_at(t0, te)
                     if z is None or abs(z) < zmin:
                         continue
                     side_up = z > 0
                     fair_side = fair if side_up else 1 - fair
-                    cand = [p for (t, p) in pts if t <= te]
-                    if not cand:
-                        continue
-                    mkt_up = cand[-1]
+                    if a.entry == "prints":
+                        # first REAL trade after the decision moment: a
+                        # price someone verifiably paid, with no
+                        # stale-quote look-back
+                        after = [(t, p) for (t, p) in prints
+                                 if te <= t <= te + 45]
+                        if not after:
+                            continue
+                        t_in, mkt_up = after[0]
+                        series = [(t, p) for (t, p) in prints
+                                  if t > t_in]
+                    else:
+                        cand = [p for (t, p) in pts if t <= te]
+                        if not cand:
+                            continue
+                        t_in, mkt_up = te, cand[-1]
+                        series = [(t, p) for (t, p) in pts if t > te]
                     price = (mkt_up if side_up else 1 - mkt_up) + 0.01
                     if not (a.min_entry <= price <= a.max_entry):
                         continue
@@ -195,12 +255,11 @@ def main():
                         continue              # model must disagree in
                     n += 1                    # our favour, or no trade
                     fee = 0.07 * price * (1 - price)
-                    later = [(t, p) for (t, p) in pts if t > te]
                     if side_up:
-                        touched = any(p >= sell_at for _, p in later)
+                        touched = any(p >= sell_at for _, p in series)
                         won = up_won
                     else:
-                        touched = any(p <= 1 - sell_at for _, p in later)
+                        touched = any(p <= 1 - sell_at for _, p in series)
                         won = not up_won
                     pay = sell_at if touched else (1.0 if won else 0.0)
                     ev_sum += pay - price - fee
