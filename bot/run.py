@@ -277,7 +277,8 @@ class Bot:
         anchor = None
         for line in (lines[1:] if size > 32 * 1024 * 1024 else lines):
             if '"settled"' not in line and '"risk_state"' not in line \
-                    and '"day_anchor"' not in line:
+                    and '"day_anchor"' not in line \
+                    and '"day_anchor_reloaded"' not in line:
                 continue
             try:
                 d = json.loads(line)
@@ -285,9 +286,14 @@ class Bot:
                 continue
             if d.get("t_us", 0) < day_start_us:
                 continue
-            if d.get("kind") == "day_anchor":
-                if anchor is None:      # the day's FIRST anchor: the
-                    anchor = d          # balance before today's losses
+            if d.get("kind") in ("day_anchor", "day_anchor_reloaded"):
+                # The day's FIRST anchor line of either kind: the balance
+                # before today's losses. Accepting reload lines makes the
+                # chain self-healing -- each restart re-writes one near
+                # the tail, so the original surviving 32MB of churn is
+                # not load-bearing.
+                if anchor is None:
+                    anchor = d
                 continue
             if d.get("kind") == "risk_state":
                 last_state = d
@@ -981,6 +987,7 @@ class Bot:
             "clob_evs": self.n_clob, "clob_errs": self.n_clob_err,
             "clob_drops": self.n_clob_drop, "resubs": self.n_resub,
             "evals": self.n_eval, "eval_errs": self.n_eval_err,
+            "log_errs": getattr(self, "n_log_err", 0),
             "signals": self.n_signal, "killed": self.risk.killed,
             "risk_state": self.risk.state_str(),
             "halts": self.risk.halts,
@@ -1524,14 +1531,17 @@ class Bot:
         our orders are serialized, so an unattributed fresh trade on the
         token we just targeted is ours."""
         found_sh, found_cost, found_px = 0.0, 0.0, None
-        oid_found = None
+        oids_found = set()
+        ok_pass = False
         for delay in (4.0, 8.0, 15.0, 30.0):
             time.sleep(delay)
-            # Reset per pass: an exception mid-iteration after partial
-            # accumulation would otherwise re-add the same trade rows on
-            # the next pass and over-book the fill.
-            found_sh, found_cost, found_px = 0.0, 0.0, None
-            oid_found = None
+            # Pass-LOCAL accumulation, published only after the iteration
+            # completes cleanly: an exception mid-iteration (a malformed
+            # row, a dropped connection between pages) must neither
+            # re-add rows on the next pass nor -- on the FINAL pass --
+            # book a partial view of the fill.
+            t_sh, t_cost, t_px = 0.0, 0.0, None
+            t_oids = set()
             try:
                 n_seen = 0
                 for tr in self._ops_client().list_account_trades(
@@ -1554,24 +1564,33 @@ class Bot:
                         continue
                     p = float(tr.price)
                     s = float(tr.size)
-                    found_sh += s
-                    found_cost += s * (p + 0.07 * p * (1 - p))
-                    found_px = p
-                    oid_found = t_oid
+                    t_sh += s
+                    t_cost += s * (p + 0.07 * p * (1 - p))
+                    t_px = p
+                    if t_oid:
+                        t_oids.add(t_oid)
+                found_sh, found_cost, found_px = t_sh, t_cost, t_px
+                oids_found = t_oids
+                ok_pass = True
                 if found_sh > 0:
                     break
             except Exception as e:  # noqa: BLE001
                 self.log_decision({"kind": "resolve_unknown_err",
                                    "slug": slug, "err": repr(e)[:150]})
         def _apply():
+            oid_one = next(iter(oids_found)) if oids_found else None
             if found_sh > 0:
-                if oid_found:
-                    self._booked_oids.add(oid_found)
+                # claim EVERY trade row's order id -- the order_id=None
+                # path can legitimately gather rows from more than one
+                # order, and an unclaimed id is exactly what a LATER
+                # resolver would double-book.
+                for o in oids_found:
+                    self._booked_oids.add(o)
                 px_eff = found_cost / found_sh
                 self.broker.taker_fills(
                     slug, side, [(found_px or px_eff, found_sh)],
                     meta={"live": True, "resolved_from": "pending",
-                          "order_id": str(order_id or oid_found)[:24]},
+                          "order_id": str(order_id or oid_one)[:24]},
                     fee_per_sh=(found_cost / found_sh
                                 - (found_px or px_eff)))
                 mkt = self.state.markets.get(slug)
@@ -1581,11 +1600,35 @@ class Bot:
                                    "slug": slug, "side": side,
                                    "sh": round(found_sh, 2),
                                    "cost": round(found_cost, 4)})
-            else:
+                # The pass that found rows saw them at MAXIMUM lag: a
+                # 15-share order crossing two makers can show one row
+                # first, and break-on-found books that partial view
+                # permanently. Hand the booking to the verifier, which
+                # re-polls at +4/12/30/90s and corrects the position
+                # toward venue truth in BOTH directions.
+                vid = order_id or oid_one
+                if vid and self._loop is not None:
+                    self._loop.run_in_executor(
+                        None, self._fill_truth, vid, slug, side, token,
+                        found_px or px_eff, found_sh)
+            elif ok_pass:
                 self.log_decision({"kind": "unknown_order_no_fill",
                                    "slug": slug, "side": side,
                                    "order_id": str(order_id)[:24]})
-            # fate known either way: lift the block
+            else:
+                # every poll pass FAILED -- the order's fate is genuinely
+                # unknown (transport trouble is exactly correlated with
+                # the failures that create unknowns). Do NOT lift the
+                # block early; let the full 90s expire. A fill landing
+                # later is caught by the cash floor and the next
+                # operator look at this loud line.
+                self.log_decision({"kind": "unknown_order_UNRESOLVED",
+                                   "slug": slug, "side": side,
+                                   "order_id": str(order_id)[:24],
+                                   "note": "all polls failed; refire "
+                                           "block left to expire"})
+                return
+            # fate known: lift the block
             self._refire_block.pop((slug, side), None)
         if self._loop is not None:
             self._loop.call_soon_threadsafe(_apply)
@@ -1664,7 +1707,10 @@ class Bot:
         """
         loop = asyncio.get_running_loop()
         while True:
-            await asyncio.sleep(300)
+            # Pass FIRST, sleep after: the cash floor must be enforced
+            # from startup, not 5 minutes in -- a crash-looping bot with
+            # sub-5-min uptime would otherwise never check it at all,
+            # and the reloaded day anchor would sit unused.
             try:
                 bal, redeemed = await loop.run_in_executor(
                     None, self._live_ops_pass)
@@ -1673,6 +1719,7 @@ class Bot:
             except Exception as e:  # noqa: BLE001
                 self.log_decision({"kind": "live_ops_err",
                                    "err": repr(e)[:200]})
+            await asyncio.sleep(300)
 
     def _ops_client(self):
         """Housekeeping/verification client on its OWN HTTP connection:
@@ -1802,13 +1849,29 @@ class Bot:
             if self._day_bal_anchor is None \
                     or self._day_bal_anchor[0] != day:
                 self._day_bal_anchor = (day, bal)
-                # Persist: the anchor lived only in memory, so a restart
-                # after a losing stretch re-based the floor at the DRAINED
-                # balance -- each restart granted a fresh daily allowance
-                # below the money already lost. _seed_day_pnl reloads the
-                # day's FIRST anchor, so the floor survives redeploys.
+                self._anchor_logged_day = None
+            elif bal > self._day_bal_anchor[1] + 150.0:
+                # A rise no plausible trading day produces at this size
+                # is a DEPOSIT: re-anchor upward (only ever tightens the
+                # floor) so new money is protected by the same $-limit.
+                # Revisit the 150 constant when per-trade size scales.
+                self._day_bal_anchor = (day, bal)
+                self._anchor_logged_day = None
+                self.log_decision({"kind": "day_anchor_deposit",
+                                   "day": day, "bal": bal})
+            # Persist -- VERIFIED and retried: the anchor lived only in
+            # memory, so a restart after a losing stretch re-based the
+            # floor at the DRAINED balance. A single unverified write
+            # was not enough either: log_decision swallows ENOSPC, and
+            # a swallowed anchor line silently restores the old bug on
+            # the next restart. Re-log on every ops pass until a write
+            # succeeds; _seed_day_pnl reloads the day's FIRST anchor.
+            if getattr(self, "_anchor_logged_day", None) != day:
+                pre_err = getattr(self, "n_log_err", 0)
                 self.log_decision({"kind": "day_anchor", "day": day,
-                                   "bal": bal})
+                                   "bal": self._day_bal_anchor[1]})
+                if getattr(self, "n_log_err", 0) == pre_err:
+                    self._anchor_logged_day = day
             floor = (self._day_bal_anchor[1]
                      - abs(self.risk.daily_loss_limit)
                      - self.risk.max_concurrent

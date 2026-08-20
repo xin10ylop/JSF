@@ -23,7 +23,8 @@
     "_micro_note": "MICRO-LIVE sizing for a ~$130 bankroll across 3 coins. Worst-case committed exposure 3 x 2 x $15 = $90; worst-case settled day 3 x -$25 = -$75. The halt ladder is identical to paper -- it detects breakage in ~20 markets, which at micro size costs cents, exactly when detection is cheapest. Scale sizes only AFTER a week of live-vs-paper reconciliation, and A/B the raise in paper first."
   },
   "rollavg_edge": {
-    "enabled": true,
+    "enabled": false,
+    "_disabled_note": "OFF as of 2026-08-20: the endgame taker is retired from live. Micro-live measured its structural problem directly -- adverse fill selection (171 kills vs 14 fills; fills avg px 0.296 vs paper 0.857) -- and the filtered variant traded too rarely to pay for its tail risks. EarlyBird replaces it as the sole real-money strategy: same model, opposite end of the window, where the book is two-sided and the strike is already formed. Retiring it also frees both concurrency slots for consecutive EarlyBird holds and removes the endgame-only failure paths (concurrent unknown resolutions on one token, post-drop orphan fills). The paper bot keeps the unfiltered endgame as the frozen control for live_vs_paper.",
     "window_s": 60,
     "zmin": 2.0,
     "edge_min": 0.02,

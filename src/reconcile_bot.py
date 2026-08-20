@@ -507,11 +507,27 @@ def main():
                      "day": time.strftime("%Y-%m-%d", time.gmtime()),
                      "bal": 60.0})                # later, post-loss
     bt._seed_day_pnl()
-    bt.decisions.close()
-    bt.decisions = old_dec
     assert bt._day_bal_anchor is not None \
         and abs(bt._day_bal_anchor[1] - 93.5) < 1e-9, \
         f"anchor reload took the wrong line: {bt._day_bal_anchor}"
+    # chain self-heals: when the original day_anchor line has churned out
+    # of the 32MB tail, the day_anchor_reloaded line a previous restart
+    # wrote must carry the original balance forward
+    bt.decisions.close()
+    import json
+    with open(os.path.join(bt.logdir, "decisions.jsonl"), "w") as fh:
+        fh.write(json.dumps({"kind": "day_anchor_reloaded",
+                             "day": time.strftime("%Y-%m-%d",
+                                                  time.gmtime()),
+                             "bal": 93.5, "t_us": _n()}) + "\n")
+    bt.decisions = open(os.path.join(bt.logdir, "decisions.jsonl"), "a")
+    bt._day_bal_anchor = None
+    bt._seed_day_pnl()
+    assert bt._day_bal_anchor is not None \
+        and abs(bt._day_bal_anchor[1] - 93.5) < 1e-9, \
+        f"reloaded-line chain broken: {bt._day_bal_anchor}"
+    bt.decisions.close()
+    bt.decisions = old_dec
     print("PASS: cash-floor anchor survives restarts at the day's first "
           "balance")
 
