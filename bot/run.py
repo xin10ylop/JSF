@@ -966,6 +966,8 @@ class Bot:
             "halts": self.risk.halts,
             "funnel": next((st.f for st in self.strategies
                             if hasattr(st, "f")), None),
+            "funnels": {type(st).__name__: dict(st.f)
+                        for st in self.strategies if hasattr(st, "f")},
             "coin": self.coin,
             "day_pnl": round(self.risk.day_pnl, 2),
             "oracle_hist": len(s.oracle_hist),
@@ -1588,7 +1590,11 @@ class Bot:
         loop = asyncio.get_running_loop()
         for m in list(self.state.markets.values()):
             rem = (m.t1_us - now) / 1e6
-            if not (0 < rem <= 150) or m.slug in self._prewarmed:
+            # warm EVERY known market (rem<=1000 covers 15m too), not
+            # just the endgame: EarlyBird's first order lands seconds
+            # after OPEN, and a cold metadata cache would put two
+            # blocking GETs back into exactly that order
+            if not (0 < rem <= 1000) or m.slug in self._prewarmed:
                 continue
             self._prewarmed.add(m.slug)
             for tok in (m.asset_id_up, m.asset_id_dn):

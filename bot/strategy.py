@@ -455,14 +455,20 @@ class EarlyBird:
         if not (0 < elapsed <= self.open_window_s):
             return None
         self.f["in_window"] += 1
-        fv = state.fair(m, t_us)
         z = state.zscore(m, t_us)
-        if fv is None or z is None:
+        if z is None:
             return None
         self.f["priced"] += 1
         if abs(z) < self.zmin:
             return None
         self.f["z_pass"] += 1
+        # Gaussian fair, NOT the empirical p_up calibration: the entire
+        # backtest evidence (+6.1c pooled t=2.96, btc +14.3c t=3.07) was
+        # measured with Phi(z), and p_up -- fitted on endgame-regime z --
+        # reads ~3c lower at z=0.3, which would silently reject a large
+        # share of the measured trades. Deploy what was measured.
+        import math as _m
+        fv = 0.5 * (1 + _m.erf(z / _m.sqrt(2)))
         side = "Up" if z > 0 else "Down"
         if side == "Up":
             ask, avail = m.best_ask()
