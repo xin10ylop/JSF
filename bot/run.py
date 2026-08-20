@@ -35,7 +35,7 @@ from bot.state import BotState, MarketState, now_us  # noqa: E402
 from bot.paper import PaperBroker  # noqa: E402
 from bot.risk import Risk  # noqa: E402
 from bot.strategy import (GzValueMaker, ExtremeTaker, VacuumLadder,  # noqa: E402
-                          RollAvgEdge)
+                          RollAvgEdge, ZMaker)
 
 GAMMA = "https://gamma-api.polymarket.com/markets"
 CFG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -92,6 +92,17 @@ class Bot:
             self.strategies.append(GzValueMaker(cfg.get("gz_maker", {})))
         if cfg.get("extreme_taker", {}).get("enabled", False):
             self.strategies.append(ExtremeTaker(cfg.get("extreme_taker", {})))
+        # The maker leg runs as a MEASUREMENT: signals are simulated
+        # against real trade prints in a fully ISOLATED ledger --
+        # separate fills file, separate settle lines, never touching the
+        # real-money broker, risk state, or the daily stop. Live taker
+        # orders and the maker sim measure two monetization paths of the
+        # same edge side by side; the divergence report compares them.
+        self.maker_broker = None
+        if cfg.get("zmaker", {}).get("enabled", False):
+            self.strategies.append(ZMaker(cfg.get("zmaker", {})))
+            self.maker_broker = PaperBroker(
+                log_path=os.path.join(self.logdir, "maker_fills.jsonl"))
         self.decisions = open(
             os.path.join(self.logdir, "decisions.jsonl"), "a")
         self.pending_settle = {}   # slug -> MarketState awaiting settlement
@@ -711,6 +722,10 @@ class Bot:
             self.state.on_trade(up_aid, px, ev.get("timestamp"), sz,
                                 buy_up=buy_up)
             self.broker.on_trade_print(up_aid, px, sz, now_us())
+            if self.maker_broker is not None:
+                # real prints drive the maker sim's fills: a print below
+                # our resting level is proof a real trade swept it
+                self.maker_broker.on_trade_print(up_aid, px, sz, now_us())
 
     # ---- decision loop -------------------------------------------------
     async def settle_loop(self):
@@ -766,6 +781,13 @@ class Bot:
                 self.log_decision({"kind": "settled", "slug": slug,
                                    "result": result, "pnl": pnl,
                                    "src": src})
+                if self.maker_broker is not None:
+                    mpnl = self.maker_broker.settle(slug, result)
+                    if mpnl != 0:
+                        # isolated measurement -- NEVER fed into risk
+                        self.log_decision({"kind": "maker_sim_settled",
+                                           "slug": slug,
+                                           "pnl": round(mpnl, 4)})
                 if self.mode == "live" and src == "oracle":
                     self._settle_verify.append(
                         (slug, result, now_us() + 180_000_000))
@@ -798,6 +820,17 @@ class Bot:
                                        "note": "unresolved 1h after "
                                                "close; booked at the "
                                                "void remedy 0.50/sh"})
+                    if self.maker_broker is not None:
+                        # same remedy for the isolated maker sim, else
+                        # its positions leak and skew the measurement
+                        for k in [k for k in self.maker_broker.positions
+                                  if k[0] == slug]:
+                            mp = self.maker_broker.positions.pop(k)
+                            self.log_decision({
+                                "kind": "maker_sim_settled", "slug": slug,
+                                "pnl": round(mp["shares"] * 0.5
+                                             - mp["cost"], 4),
+                                "src": "voided_0.5"})
                 else:
                     # Paper: free the concurrency slot. An unscored
                     # position left in broker.positions counts toward
@@ -1190,7 +1223,12 @@ class Bot:
                                           lvl, size, 200.0, m.t1_us,
                                           meta={"reason": sig["reason"]})
             elif sig["action"] == "maker_buy":
-                self.broker.maker_buy(
+                mb = self.maker_broker or self.broker
+                # cancel-and-replace: one live quote per market. Without
+                # this a reprice stacks resting orders and the sim fills
+                # multiples of the intended size.
+                mb.cancel_all(m.slug)
+                mb.maker_buy(
                     m.slug, m.asset_id_up, sig["side"], sig["level"], size,
                     sig.get("queue_ahead", 0),
                     now_us() + int(sig.get("ttl_s", 20) * 1e6),

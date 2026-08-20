@@ -324,3 +324,90 @@ class RollAvgEdge:
                     "reason": f"rollavg z={z:+.2f} emp_fairD {1-fv:.3f} vs "
                               f"askD {ask_dn:.3f}({dn_src}) rem {rem:.0f}s"}
         return None
+
+
+class ZMaker:
+    """Maker leg of the endgame edge: REST a bid on the favoured side at
+    fair-minus-margin instead of chasing asks that vanish.
+
+    Why this exists: 24h of live taker orders measured the fill process
+    itself -- 171 FAK kills vs 14 fills, with fills landing at avg px
+    0.296 against paper's 0.857 in the same hours. The favourite's ask
+    side empties in the final 30s (sampled live by the research fleet),
+    so the taker leg starves exactly where the edge is largest, and what
+    it does catch is adversely selected. The flow is still there: 55-62%
+    of volume in these markets is bots, and every panic seller of the
+    favourite (= buyer of the longshot) needs a resting bid to hit. Be
+    that bid, priced by OUR calibrated fair, cancelled the moment the
+    model moves.
+
+    Quote discipline:
+      - favoured side only (|z| >= zmin), level = fair_side - margin,
+        clamped below the ask (never cross: a crossing bid is a taker)
+      - one live quote per (slug, side); re-quote only when fair moved
+        >= requote_c or the previous quote expired
+      - TTL-bounded, and never resting into the final seconds (a fill at
+        rem<3s on a flipping market is pure adverse selection)
+
+    Fills are simulated against REAL trade prints by PaperBroker's
+    price-priority rule (a print below our level proves a real trade
+    swept it) -- far more honest than taker fill simulation, because
+    prints are executed volume, not displayed offers.
+    """
+
+    def __init__(self, cfg):
+        self.window_s = cfg.get("window_s", 90)
+        self.zmin = cfg.get("zmin", 2.0)
+        self.margin = cfg.get("margin", 0.03)
+        self.size = cfg.get("size", 10)
+        self.max_level = cfg.get("max_level", 0.97)
+        self.min_level = cfg.get("min_level", 0.05)
+        self.min_rem_s = cfg.get("min_rem_s", 8.0)
+        self.ttl_s = cfg.get("ttl_s", 10.0)
+        self.requote_c = cfg.get("requote_c", 0.01)
+        self.last_quote = {}    # (slug, side) -> (level, t_us)
+        self.f = {"eval": 0, "in_window": 0, "priced": 0, "quoted": 0}
+
+    def evaluate(self, state, m, t_us):
+        self.f["eval"] += 1
+        rem = (m.t1_us - t_us) / 1e6
+        if rem > min(self.window_s, 3 * m.w) or rem <= self.min_rem_s:
+            return None
+        self.f["in_window"] += 1
+        fv = state.fair(m, t_us)
+        z = state.zscore(m, t_us)
+        if fv is None or z is None or abs(z) < self.zmin:
+            return None
+        self.f["priced"] += 1
+        side = "Up" if z > 0 else "Down"
+        fair_side = fv if side == "Up" else 1 - fv
+        level = min(fair_side - self.margin, self.max_level)
+        # never cross the spread -- a bid at/above the ask TAKES
+        if side == "Up":
+            ba, _ = m.best_ask()
+            if ba is not None and 0 < ba < 1 and level >= ba:
+                level = ba - 0.01
+            queue = sum(sz for p, sz in m.bids
+                        if abs(p - round(level, 2)) < 1e-9)
+        else:
+            ad, _sz, _src = m.best_ask_dn()
+            if ad is not None and 0 < ad < 1 and level >= ad:
+                level = ad - 0.01
+            queue = sum(sz for p, sz in (m.bids_dn or [])
+                        if abs(p - round(level, 2)) < 1e-9)
+        level = round(level, 2)
+        if level < self.min_level:
+            return None
+        last = self.last_quote.get((m.slug, side))
+        if last is not None and abs(level - last[0]) < self.requote_c \
+                and (t_us - last[1]) < self.ttl_s * 1e6:
+            return None     # existing quote still stands
+        self.last_quote[(m.slug, side)] = (level, t_us)
+        self.f["quoted"] += 1
+        # never rest into the final 3 seconds
+        ttl = min(self.ttl_s, max(rem - 3.0, 1.0))
+        return {"action": "maker_buy", "side": side, "level": level,
+                "size": self.size, "queue_ahead": queue, "ttl_s": ttl,
+                "z": round(z, 2),
+                "reason": f"zmaker z={z:+.2f} fair_{side[0]} "
+                          f"{fair_side:.3f} bid {level:.2f} rem {rem:.0f}s"}

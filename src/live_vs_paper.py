@@ -99,6 +99,32 @@ def orders_of(logdir, since_us):
     return c, filled_sh
 
 
+def maker_sim_of(logdir, since_us):
+    """The isolated maker-leg measurement: fills and settles from
+    maker_fills.jsonl (simulated against real prints, never touching
+    the real-money books)."""
+    path = os.path.join(logdir, "maker_fills.jsonl")
+    sh = cost = 0.0
+    n_orders = n_fills = 0
+    pnl = settled_sh = 0.0
+    for d in read_jsonl(path, since_us):
+        k = d.get("kind")
+        if k == "order":
+            n_orders += 1
+        elif k == "maker_fill":
+            n_fills += 1
+            s = float(d.get("shares", 0))
+            sh += s
+            cost += s * float(d.get("px", 0))
+        elif k == "settle":
+            s = float(d.get("shares", 0))
+            settled_sh += s
+            pnl += float(d.get("payoff", 0)) - float(d.get("cost", 0))
+    return {"orders": n_orders, "fills": n_fills, "sh": sh,
+            "avg": (cost / sh) if sh else None,
+            "pnl": pnl, "settled_sh": settled_sh}
+
+
 def last_balance(logdir, since_us):
     bal = None
     for d in read_jsonl(os.path.join(logdir, "decisions.jsonl"), since_us):
@@ -189,6 +215,14 @@ def main():
         po = {k[0] for k in paper} - {k[0] for k in live}
         print(f"  overlap: live-only mkts {len(lo)}, "
               f"paper-only {len(po)}")
+        mk = maker_sim_of(ldir, since_us)
+        if mk["orders"] or mk["fills"]:
+            per = (100 * mk["pnl"] / mk["settled_sh"]
+                   if mk["settled_sh"] else 0.0)
+            avg = f"{mk['avg']:.4f}" if mk["avg"] else "-"
+            print(f"  maker sim: {mk['orders']} quotes, {mk['fills']} "
+                  f"fills / {mk['sh']:.1f} sh @ {avg}, settled "
+                  f"${mk['pnl']:+.2f} ({per:+.2f}c/sh)")
         bal = last_balance(ldir, since_us)
         if bal:
             t = time.strftime("%H:%M", time.gmtime(bal["t_us"] / 1e6))

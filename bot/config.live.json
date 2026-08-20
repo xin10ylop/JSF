@@ -55,5 +55,18 @@
     "min_order_size": 5.0,
     "use_tape_cap": true
   },
-  "_fill_note": "Drives the paper simulation inside shadow mode and min_order_size (the venue's orderMinSize) in live mode. The rest is ignored by the live path: reality fills real orders."
+  "_fill_note": "Drives the paper simulation inside shadow mode and min_order_size (the venue's orderMinSize) in live mode. The rest is ignored by the live path: reality fills real orders.",
+  "zmaker": {
+    "enabled": true,
+    "window_s": 90,
+    "zmin": 2.0,
+    "margin": 0.03,
+    "size": 10,
+    "ttl_s": 10,
+    "min_rem_s": 8,
+    "max_level": 0.97,
+    "min_level": 0.05,
+    "requote_c": 0.01,
+    "_note": "MEASUREMENT ONLY -- simulated against real trade prints in an isolated ledger (maker_fills.jsonl / maker_sim_settled lines), never touching the real-money broker or risk. Rationale: 24h of live takers measured adverse fill selection (171 kills vs 14 fills; fills at avg 0.296 vs paper 0.857) -- the favourite's ask side empties in the final 30s, so the taker leg starves where the edge is largest. The maker leg rests a bid at fair-minus-3c on the favoured side, TTL 10s, cancel-and-replace, never resting into the final 3s. Maker fills on prints are the HONEST direction of simulation (prints are executed volume). If a few days measure it positive at meaningful volume, the real maker executor gets built."
+  }
 }
