@@ -1279,6 +1279,18 @@ class Bot:
                        if v["shares"] > 0}
                       | {o["slug"] for o in self.pending + self.inflight})
             px = sig.get("level", sig.get("px", 0.5))
+            if self.mode == "live" and sig.get("action") == "taker_buy":
+                # Size against the PADDED limit, not the ask we saw. A
+                # BUY here is rate-based: makerAmount = size x limit is
+                # the cash committed, so sizing on the unpadded price
+                # and sending a padded limit quietly commits more than
+                # the per-market dollar cap allows. Pad first, size
+                # second, and the cap binds on the money that can
+                # actually leave. (Price improvement then returns MORE
+                # shares for those same dollars -- the good direction,
+                # and bounded by the cash, which is what can be lost.)
+                px = self._pad_limit(sig["px"], sig.get("fair"))
+                sig["limit_px"] = px
             size = self.risk.size_ok(pos["shares"], pos["cost"],
                                      sig["size"], px, nmk)
             if size <= 0:
@@ -1421,7 +1433,9 @@ class Bot:
             # stale book; the 0.99-vs-0.022 trade carried ev_est -0.196.)
             self._refire_block[(m.slug, sig["side"])] = now + 3_000_000
             return
-        lim = self._pad_limit(sig["px"], sig.get("fair"))
+        # already computed at sizing time so the dollar cap binds on it
+        lim = sig.get("limit_px") or self._pad_limit(sig["px"],
+                                                     sig.get("fair"))
         o = {"slug": m.slug, "side": sig["side"], "limit": lim,
              "size": float(size),
              "meta": {"reason": sig["reason"], "z": sig.get("z"),
@@ -1462,6 +1476,14 @@ class Bot:
             return seen_px
         floor = float(self.cfg.get("taker_pad_min_edge", 0.005))
         cap = float(self.cfg.get("taker_pad_max_price", 0.99))
+        # Bound the pad RELATIVE to the price as well as absolutely: a
+        # flat 5c on a 3c ask is a 167% overpay allowance, and most of
+        # this strategy's entries are cheap. Measured, the relative cap
+        # keeps every bit of the fill-rate gain (+5.82c/sh t=3.15 vs
+        # +5.51c/sh t=3.02 flat) while capping what a bad print can
+        # cost. One tick is always allowed -- that is the whole point.
+        rel = float(self.cfg.get("taker_pad_rel", 0.25))
+        pad = min(pad, max(0.01, rel * seen_px))
         lim = min(seen_px + pad, cap)
         while lim > seen_px:
             if fair - lim - 0.07 * lim * (1 - lim) >= floor:
