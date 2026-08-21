@@ -100,7 +100,26 @@ class LiveExecutor:
         # OUTSIDE the EIP-712 signature, so restamping the signed order
         # GTC->FAK is valid: it crosses at prices <= ours or dies, and
         # can never rest on the book.
-        px = round(float(max_price), 2)           # tick 0.01, static
+        # CEIL to the tick, never round. A limit is a CAP: rounding it
+        # DOWN puts it under the ask we are trying to lift, and the order
+        # is dead before it leaves -- guaranteed, not probabilistic. The
+        # venue's tick drops to 0.001 above 0.96, so an ask of 0.974
+        # round()ed to 0.97 was pre-killed by arithmetic. Ceiling costs
+        # nothing: a CLOB matches a taker at the RESTING maker's price,
+        # so a limit above the ask pays the ask, not the limit.
+        px = math.ceil(float(max_price) * 100 - 1e-9) / 100.0
+        if px > 0.99 + 1e-9:
+            # Above the 0.99 cap a 2-decimal limit cannot reach the ask
+            # at all. Sending one anyway is a guaranteed kill dressed up
+            # as an attempt; refuse instead, so the miss is visible and
+            # honest rather than buried in the kill count.
+            self._emit("order_skip_above_tick_cap", slug=slug,
+                       outcome=outcome, ask=round(float(max_price), 4))
+            return {"status": "killed", "filled": 0.0, "avg_px": None,
+                    "order_id": None,
+                    "detail": f"ask {float(max_price):.4f} above the 0.99 "
+                              f"two-decimal cap; no marketable limit"}
+        px = round(px, 2)
         c = int(round(px * 100))
         # The venue demands the BUY makerAmount land on whole cents:
         # size*price must have <= 2 decimals, so the allowed share step

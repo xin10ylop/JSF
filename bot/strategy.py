@@ -304,7 +304,9 @@ class RollAvgEdge:
             self.last_book[(m.slug, "Up")] = stamp_up
             return {"action": "taker_buy", "side": "Up", "px": ba,
                     "avail": bas, "size": self.size,
-                    "ev_est": round(ev_of(fv, ba), 4), "z": round(z, 2),
+                    "fair": round(fv, 4),
+                    "ev_est": round(ev_of(fv, ba), 4),
+                    "z": round(z, 2),
                     "oracle_age_s": oa,
                     "reason": f"rollavg z={z:+.2f} emp_fair {fv:.3f} vs ask "
                               f"{ba:.3f} rem {rem:.0f}s"}
@@ -319,6 +321,7 @@ class RollAvgEdge:
             self.last_book[(m.slug, "Down")] = stamp_dn
             return {"action": "taker_buy", "side": "Down", "px": ask_dn,
                     "avail": dn_sz, "size": self.size,
+                    "fair": round(1 - fv, 4),
                     "ev_est": round(ev_of(1 - fv, ask_dn), 4),
                     "z": round(z, 2), "dn_src": dn_src, "oracle_age_s": oa,
                     "reason": f"rollavg z={z:+.2f} emp_fairD {1-fv:.3f} vs "

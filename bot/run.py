@@ -1421,14 +1421,53 @@ class Bot:
             # stale book; the 0.99-vs-0.022 trade carried ev_est -0.196.)
             self._refire_block[(m.slug, sig["side"])] = now + 3_000_000
             return
-        o = {"slug": m.slug, "side": sig["side"], "limit": sig["px"],
+        lim = self._pad_limit(sig["px"], sig.get("fair"))
+        o = {"slug": m.slug, "side": sig["side"], "limit": lim,
              "size": float(size),
              "meta": {"reason": sig["reason"], "z": sig.get("z"),
+                      "pad_c": round(100 * (lim - sig["px"]), 1),
                       "oracle_age_s": sig.get("oracle_age_s"),
                       "ev_est": sig.get("ev_est"), "seen_px": sig["px"]}}
         self.inflight.append(o)
         self.n_sent += 1
         asyncio.get_running_loop().create_task(self._live_roundtrip(o, tok))
+
+    def _pad_limit(self, seen_px, fair):
+        """Marketable-limit padding: the fix for one-way fill selection.
+
+        A limit is a CAP, and a CLOB matches a taker at the RESTING
+        maker's price -- so a limit above the ask pays the ask, not the
+        limit. This venue additionally re-validates the order after its
+        250ms taker hold (docs: crypto up/down markets), which means a
+        limit set to EXACTLY the ask we saw dies to any uptick during
+        the round trip.
+
+        That failure is not symmetric, and that is the whole problem: an
+        unpadded taker fills when the price ticks DOWN (the market moved
+        against our thesis) and is killed when it ticks UP (our thesis
+        was right). Live measured the result directly -- 171 kills to 14
+        fills, and fills averaging 0.296 against paper's 0.857. Padding
+        removes the asymmetry; measured on 8 days of real prints it
+        lifts the fill rate from 67% to ~90% with no EV decay, because
+        the fills it adds are the ones we were being denied for being
+        right.
+
+        Bounded by value, never by hope: the pad is capped so that even
+        paying the limit IN FULL leaves `pad_min_edge` of modelled edge
+        after the venue's 0.07*p*(1-p) fee. With no fair value we do not
+        pad at all.
+        """
+        pad = float(self.cfg.get("taker_pad", 0.0) or 0.0)
+        if pad <= 0 or fair is None:
+            return seen_px
+        floor = float(self.cfg.get("taker_pad_min_edge", 0.005))
+        cap = float(self.cfg.get("taker_pad_max_price", 0.99))
+        lim = min(seen_px + pad, cap)
+        while lim > seen_px:
+            if fair - lim - 0.07 * lim * (1 - lim) >= floor:
+                break
+            lim -= 0.005
+        return round(max(lim, seen_px), 4)
 
     async def _live_roundtrip(self, o, token):
         """Await one venue round trip in a worker thread and book reality.
