@@ -1,85 +1,85 @@
 {
-  "mode": "live",
-  "_mode_note": "LIVE as of 2026-08-19 ~19:20 UTC, btc first (staged: eth, then sol, each after the previous is stable for ~a day). Shadow verified on all three coins: correct token per side vs gamma, exact dollar math, caps respected; btc's clean hour showed 243 signals with zero pricing-integrity rejections. The paper btc bot keeps running as the frozen baseline for src/live_vs_paper.py.",
-  "families": {
-    "5m": 300,
-    "15m": 900
+ "mode": "live",
+ "_mode_note": "LIVE as of 2026-08-19 ~19:20 UTC, btc first (staged: eth, then sol, each after the previous is stable for ~a day). Shadow verified on all three coins: correct token per side vs gamma, exact dollar math, caps respected; btc's clean hour showed 243 signals with zero pricing-integrity rejections. The paper btc bot keeps running as the frozen baseline for src/live_vs_paper.py.",
+ "families": {
+  "5m": 300,
+  "15m": 900
+ },
+ "risk": {
+  "max_market_shares": 20,
+  "max_market_dollars": 15.0,
+  "max_concurrent_markets": 2,
+  "daily_loss_limit": 25.0,
+  "stale_oracle_s": 5.0,
+  "stale_book_s": 10.0,
+  "halt": {
+   "streak_n": 20,
+   "streak_losses": 6,
+   "cooloff_s": 7200,
+   "resume_frac": 0.5,
+   "probe_markets": 10,
+   "probe_losses": 3
   },
-  "risk": {
-    "max_market_shares": 20,
-    "max_market_dollars": 15.0,
-    "max_concurrent_markets": 2,
-    "daily_loss_limit": 25.0,
-    "stale_oracle_s": 5.0,
-    "stale_book_s": 10.0,
-    "halt": {
-      "streak_n": 20,
-      "streak_losses": 6,
-      "cooloff_s": 7200,
-      "resume_frac": 0.5,
-      "probe_markets": 10,
-      "probe_losses": 3
-    },
-    "_micro_note": "MICRO-LIVE sizing for a ~$130 bankroll across 3 coins. Worst-case committed exposure 3 x 2 x $15 = $90; worst-case settled day 3 x -$25 = -$75. The halt ladder is identical to paper -- it detects breakage in ~20 markets, which at micro size costs cents, exactly when detection is cheapest. Scale sizes only AFTER a week of live-vs-paper reconciliation, and A/B the raise in paper first."
-  },
-  "rollavg_edge": {
-    "enabled": false,
-    "_disabled_note": "OFF as of 2026-08-20: the endgame taker is retired from live. Micro-live measured its structural problem directly -- adverse fill selection (171 kills vs 14 fills; fills avg px 0.296 vs paper 0.857) -- and the filtered variant traded too rarely to pay for its tail risks. EarlyBird replaces it as the sole real-money strategy: same model, opposite end of the window, where the book is two-sided and the strike is already formed. Retiring it also frees both concurrency slots for consecutive EarlyBird holds and removes the endgame-only failure paths (concurrent unknown resolutions on one token, post-drop orphan fills). The paper bot keeps the unfiltered endgame as the frozen control for live_vs_paper.",
-    "window_s": 60,
-    "zmin": 2.0,
-    "edge_min": 0.02,
-    "size": 10,
-    "max_price": 0.99,
-    "min_rem_s": 2.0,
-    "require_edge": true,
-    "cooldown_s": 0.0,
-    "skip_px": null,
-    "min_price": 0.0,
-    "_size_note": "10 shares (~$9 at typical fill px) against paper's 100. Every GATE is identical to the frozen paper config -- same zmin, same max_price, same window -- so live and paper disagree only about execution, which is the one thing micro-live exists to measure. The venue min is 5 shares; risk room below that is logged as live_miss/below_venue_min, not sent.",
-    "_require_edge_note": "ON for LIVE as of 2026-08-20 (paper keeps it OFF as the control). Live measured adverse fill selection the tape cannot show: 171 kills vs 14 fills overnight, with fills averaging px 0.296 vs paper's 0.857 -- the venue fills us eagerly when the quote is going bad and starves us when it's right. require_edge only buys when ask <= empirical_fair - edge_min (2c), the pre-measured +10.15c/sh filter (3x per-share edge on ~1/5 volume): trades that are mispriced in OUR favor, which adverse selection cannot punish. The divergence report A/Bs this against the unfiltered paper baseline."
-  },
-  "coin": "btc",
+  "_micro_note": "MICRO-LIVE sizing for a ~$130 bankroll across 3 coins. Worst-case committed exposure 3 x 2 x $15 = $90; worst-case settled day 3 x -$25 = -$75. The halt ladder is identical to paper -- it detects breakage in ~20 markets, which at micro size costs cents, exactly when detection is cheapest. Scale sizes only AFTER a week of live-vs-paper reconciliation, and A/B the raise in paper first."
+ },
+ "rollavg_edge": {
+  "enabled": false,
+  "_disabled_note": "OFF as of 2026-08-20: the endgame taker is retired from live. Micro-live measured its structural problem directly -- adverse fill selection (171 kills vs 14 fills; fills avg px 0.296 vs paper 0.857) -- and the filtered variant traded too rarely to pay for its tail risks. EarlyBird replaces it as the sole real-money strategy: same model, opposite end of the window, where the book is two-sided and the strike is already formed. Retiring it also frees both concurrency slots for consecutive EarlyBird holds and removes the endgame-only failure paths (concurrent unknown resolutions on one token, post-drop orphan fills). The paper bot keeps the unfiltered endgame as the frozen control for live_vs_paper.",
+  "window_s": 60,
+  "zmin": 2.0,
+  "edge_min": 0.02,
+  "size": 10,
+  "max_price": 0.99,
+  "min_rem_s": 2.0,
+  "require_edge": true,
+  "cooldown_s": 0.0,
+  "skip_px": null,
+  "min_price": 0.0,
+  "_size_note": "10 shares (~$9 at typical fill px) against paper's 100. Every GATE is identical to the frozen paper config -- same zmin, same max_price, same window -- so live and paper disagree only about execution, which is the one thing micro-live exists to measure. The venue min is 5 shares; risk room below that is logged as live_miss/below_venue_min, not sent.",
+  "_require_edge_note": "ON for LIVE as of 2026-08-20 (paper keeps it OFF as the control). Live measured adverse fill selection the tape cannot show: 171 kills vs 14 fills overnight, with fills averaging px 0.296 vs paper's 0.857 -- the venue fills us eagerly when the quote is going bad and starves us when it's right. require_edge only buys when ask <= empirical_fair - edge_min (2c), the pre-measured +10.15c/sh filter (3x per-share edge on ~1/5 volume): trades that are mispriced in OUR favor, which adverse selection cannot punish. The divergence report A/Bs this against the unfiltered paper baseline."
+ },
+ "coin": "btc",
+ "coins": [
+  "btc",
+  "eth",
+  "sol"
+ ],
+ "_coins_note": "Live roster per the strict-model gate: btc/eth/sol passed (6 days, t=+7.99 aggregate). xrp is excluded (-0.16c/sh strict), doge held back as paper-only until its +0.57 firms up.",
+ "venue_hold_ms": 250,
+ "rtt_ms": 160,
+ "_latency_note": "Used by the paper half of shadow mode only. In live mode no simulated latency is added: the venue's real 250ms hold and the real Amsterdam rtt replace the model.",
+ "fill": {
+  "participation": 0.5,
+  "vol_participation": 0.25,
+  "vol_window_s": 5.0,
+  "reject_rate": 0.01,
+  "min_order_size": 5.0,
+  "use_tape_cap": true
+ },
+ "_fill_note": "Drives the paper simulation inside shadow mode and min_order_size (the venue's orderMinSize) in live mode. The rest is ignored by the live path: reality fills real orders.",
+ "zmaker": {
+  "enabled": true,
+  "window_s": 90,
+  "zmin": 2.0,
+  "margin": 0.03,
+  "size": 10,
+  "ttl_s": 10,
+  "min_rem_s": 8,
+  "max_level": 0.97,
+  "min_level": 0.05,
+  "requote_c": 0.01,
+  "_note": "MEASUREMENT ONLY -- simulated against real trade prints in an isolated ledger (maker_fills.jsonl / maker_sim_settled lines), never touching the real-money broker or risk. Rationale: 24h of live takers measured adverse fill selection (171 kills vs 14 fills; fills at avg 0.296 vs paper 0.857) -- the favourite's ask side empties in the final 30s, so the taker leg starves where the edge is largest. The maker leg rests a bid at fair-minus-3c on the favoured side, TTL 10s, cancel-and-replace, never resting into the final 3s. Maker fills on prints are the HONEST direction of simulation (prints are executed volume). If a few days measure it positive at meaningful volume, the real maker executor gets built."
+ },
+ "earlybird": {
+  "enabled": false,
   "coins": [
-    "btc",
-    "eth",
-    "sol"
+   "btc"
   ],
-  "_coins_note": "Live roster per the strict-model gate: btc/eth/sol passed (6 days, t=+7.99 aggregate). xrp is excluded (-0.16c/sh strict), doge held back as paper-only until its +0.57 firms up.",
-  "venue_hold_ms": 250,
-  "rtt_ms": 160,
-  "_latency_note": "Used by the paper half of shadow mode only. In live mode no simulated latency is added: the venue's real 250ms hold and the real Amsterdam rtt replace the model.",
-  "fill": {
-    "participation": 0.5,
-    "vol_participation": 0.25,
-    "vol_window_s": 5.0,
-    "reject_rate": 0.01,
-    "min_order_size": 5.0,
-    "use_tape_cap": true
-  },
-  "_fill_note": "Drives the paper simulation inside shadow mode and min_order_size (the venue's orderMinSize) in live mode. The rest is ignored by the live path: reality fills real orders.",
-  "zmaker": {
-    "enabled": true,
-    "window_s": 90,
-    "zmin": 2.0,
-    "margin": 0.03,
-    "size": 10,
-    "ttl_s": 10,
-    "min_rem_s": 8,
-    "max_level": 0.97,
-    "min_level": 0.05,
-    "requote_c": 0.01,
-    "_note": "MEASUREMENT ONLY -- simulated against real trade prints in an isolated ledger (maker_fills.jsonl / maker_sim_settled lines), never touching the real-money broker or risk. Rationale: 24h of live takers measured adverse fill selection (171 kills vs 14 fills; fills at avg 0.296 vs paper 0.857) -- the favourite's ask side empties in the final 30s, so the taker leg starves where the edge is largest. The maker leg rests a bid at fair-minus-3c on the favoured side, TTL 10s, cancel-and-replace, never resting into the final 3s. Maker fills on prints are the HONEST direction of simulation (prints are executed volume). If a few days measure it positive at meaningful volume, the real maker executor gets built."
-  },
-  "earlybird": {
-    "enabled": true,
-    "coins": [
-      "btc"
-    ],
-    "zmin": 0.3,
-    "size": 15,
-    "open_window_s": 45,
-    "max_price": 0.8,
-    "min_price": 0.3,
-    "_note": "At-open taker, hold to settlement. Fair = gaussian Phi(z) computed in-strategy (matches how the edge was measured; the empirical p_up calibration was fitted on the endgame regime and reads ~3c lower at z=0.3). HISTORY: the original 2026-08-20 backtest (+14.3c/sh btc at zmin 0.3) was found to be substantially a DATA ARTIFACT -- the trades API caps at 1000 rows newest-first, so busy markets were missing their opening prints and the measured set was volume-biased. The honest paginated tape reads btc NEGATIVE at zmin 0.3 (~-3c/sh) and positive only at higher conviction (z>=0.5: ~+11c; z>=0.8: ~+22c) with sol positive at zmin 0.3 (~+8c, survives ask-side+tick executability). Calibration: Phi overstates the win rate for |z|<0.5 -- the opening market already prices most of that information. zmin/coins here are set by the pre-committed holdout validation (first half fits, second half judges); do not lower zmin without re-running the audit."
-  }
+  "zmin": 0.3,
+  "size": 15,
+  "open_window_s": 45,
+  "max_price": 0.8,
+  "min_price": 0.3,
+  "_note": "DISABLED 2026-08-21 after out-of-sample judgment. Pre-committed holdout (Aug 15-20, paginated tape, 1594 btc / 1467 sol markets): btc zmin0.5 +3.98c/sh t=0.82 (bar was +5c), as-deployed-with-strike-latch +1.96c, at the live sigma threshold +0.23c ~= zero; sol +2.97c t=0.88, 3/6 days. Aug-21 fresh slice negative. The original +14.3c was a trades-API truncation artifact (1000-row cap, newest-first) plus in-sample selection. Do not re-enable without a NEW edge measured on paginated tape through pre-committed bars."
+ }
 }
