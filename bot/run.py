@@ -1279,7 +1279,8 @@ class Bot:
                        if v["shares"] > 0}
                       | {o["slug"] for o in self.pending + self.inflight})
             px = sig.get("level", sig.get("px", 0.5))
-            if self.mode == "live" and sig.get("action") == "taker_buy":
+            if self.mode in ("live", "shadow") \
+                    and sig.get("action") == "taker_buy":
                 # Size against the PADDED limit, not the ask we saw. A
                 # BUY here is rate-based: makerAmount = size x limit is
                 # the cash committed, so sizing on the unpadded price
@@ -1338,7 +1339,7 @@ class Bot:
                 self.n_sent += 1
                 self.pending.append({
                     "slug": m.slug, "side": sig["side"],
-                    "limit": sig["px"], "size": size,
+                    "limit": sig.get("limit_px", sig["px"]), "size": size,
                     "fire_us": now_us() + self.latency_us,
                     "meta": {"reason": sig["reason"],
                              "oracle_age_s": sig.get("oracle_age_s"),
@@ -1352,8 +1353,11 @@ class Bot:
                     tok = m.asset_id_up if sig["side"] == "Up" \
                         else m.asset_id_dn
                     if tok:
+                        # the PADDED limit: shadow exists to record what
+                        # live would send, and live pads (see _pad_limit)
                         self.executor.submit_taker(
-                            tok, "BUY", size, sig["px"], slug=m.slug,
+                            tok, "BUY", size,
+                            sig.get("limit_px", sig["px"]), slug=m.slug,
                             outcome=sig["side"])
 
     # ---- live execution ------------------------------------------------
