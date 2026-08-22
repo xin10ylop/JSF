@@ -2,14 +2,13 @@
   "mode": "live",
   "_mode_note": "LIVE as of 2026-08-19 ~19:20 UTC, btc first (staged: eth, then sol, each after the previous is stable for ~a day). Shadow verified on all three coins: correct token per side vs gamma, exact dollar math, caps respected; btc's clean hour showed 243 signals with zero pricing-integrity rejections. The paper btc bot keeps running as the frozen baseline for src/live_vs_paper.py.",
   "families": {
-    "5m": 300,
-    "15m": 900
+    "5m": 300
   },
   "risk": {
     "max_market_shares": 200,
-    "max_market_dollars": 27.0,
+    "max_market_dollars": 11.0,
     "max_concurrent_markets": 3,
-    "daily_loss_limit": 50.0,
+    "daily_loss_limit": 15.0,
     "stale_oracle_s": 5.0,
     "stale_book_s": 10.0,
     "halt": {
@@ -22,7 +21,7 @@
     },
     "_micro_note": "Two live strategies on a ~$68 wallet. The risk block is GLOBAL, not per-strategy, so this sizes the COMBINED book: 3 concurrent x $12 = $36 worst-case committed, about half the bankroll, with the rest as settlement buffer. They rarely collide -- jumpscalp fires in a market's first 5s and is flat within 30s; rollavg fires in its last 30s. Daily stop $20: jumpscalp alone runs ~63 trades/day at 20sh, so a normal day swings roughly +/-$13 around an expected +$26 -- a tighter stop would fire on noise, a looser one is a third of the wallet.",
     "_risk_note": "Sized as a SYSTEM 2026-08-22: at size 15/$15 cap the honest print-capped sim runs ~$15-20/day with daily sd ~$20; the $50 stop is ~2.5 sigma, so it fires on a broken edge, not on the routine losing streaks that precede the cheap-band 5x winners (23% hit rate there is BY DESIGN -- break-even is the entry price). The old 20 stop was HALF a daily sd at the old size: it would have stopped the strategy on ordinary variance, collecting the 77% of cheap losers and being dark for the wins. max_market_shares 25 -> 200: the venue's price improvement fills more shares than sized (limit 0.53 -> fill 0.17 = 3x shares) and the DOLLAR cap is the real exposure bound; a low share cap only blocks the cheap band's deployment. Worst case per market stays = dollars committed = $15. Needs ~$60 balance for 3 concurrent; scale caps and stop TOGETHER, linearly, when the bankroll grows.",
-    "max_market_dollars_cheap": 15.0,
+    "max_market_dollars_cheap": 8.0,
     "cheap_px": 0.9,
     "_rung_note": "RUNG 0, sized to the ~$60 balance 2026-08-22: locked 25 sh (~$25/market, two markets can be in flight between buy and redeem, so ~$54 peak against ~$60 cash -- occasional balance rejections just skip a trade). Tape sim: ~$60/day, worst day -$14, 2/9 days negative. Deposit ladder: $250 -> locked 50 / cap 55 / stop 80; $700 -> 150/160/200; $1.8k -> 400/420/500. Advance a rung only after >=100 locked fills realise within 0.5c of tape (src/pnl.py); scale cap and stop with size."
   },
@@ -32,7 +31,7 @@
     "window_s": 60,
     "zmin": 1.5,
     "edge_min": 0.02,
-    "size": 15,
+    "size": 8,
     "max_price": 0.99,
     "min_rem_s": 2.0,
     "require_edge": false,
@@ -44,7 +43,7 @@
     "_relaunch_note": "RE-ENABLED 2026-08-21 with the padded marketable limit. It was retired on 08-20 for adverse fill selection; that turned out to be an EXECUTION defect (unpadded limit + a round() that put the limit UNDER the ask above 0.96), not a defect of the prediction. Print-proof pooled: +5.51c/sh t=3.02, 7/9 days positive, holdout Aug18-21 +4.44c/sh; ~25 trades/day at the current micro caps. Entries skew cheap (avg 0.213) so per-trade variance is high: the daily stop, not the per-trade size, is the real risk control.",
     "_gate_note": "PAPER gate, unchanged: require_edge false, max_price 0.99, zmin 2.0. This is the configuration to fix and measure, not to redesign. It was briefly switched to require_edge after four live trades lost -- a 4-fill sample against a 628-fill measurement (+3.24c/sh, t=2.99, 8/9 days positive) on a strategy whose per-share sd is 34c. That override was not justified by the evidence and is reverted. Capacity note: the deep book sits at 0.96-0.99 (10k+ shares resting, book probe median depth 33,767), which is exactly the band this gate trades, so size is limited by the edge holding at scale, not by liquidity.",
     "_zmin_note": "2.0 -> 1.5 on 2026-08-22 after the 8-day holdout verification (src/endgame_lab.py, 2259 markets, print-proof fills, 40% time holdout): z1.5 HOLDOUT +3.07c/sh (t=2.3, n=246) vs z2.0 +2.25c (t=1.4, n=163) -- ~50% more trades at equal-or-better per-share edge, and 1/9 negative days vs 2/9 in the dollar sim. zmin 2.5/3.0 look better in-sample and FAIL the holdout (-0.12c, -0.93c): the tighter gates were overfit. require_edge also fails holdout (+1.67c t=0.4 vs +9.39c in-sample) and stays off.",
-    "size_locked": 25,
+    "size_locked": 10,
     "locked_px": 0.9,
     "_ladder_note": "SIZE LADDER for the locked band (>=0.90), 2026-08-22. Capacity there is resting depth (book probe median 33,767 executable shares; 10k+ per tick observed), not prints, so it scales -- but edge at size is unproven live, so climb in rungs: 50 -> 150 -> 400, advancing only after >=100 locked fills realise within 0.5c of the tape's +1.8c/share (check with src/pnl.py). Each rung also scales max_market_dollars and daily_loss_limit proportionally. If realised collapses at a rung, the ladder found the real capacity: step back."
   },
@@ -119,5 +118,6 @@
     "dir_mode": "both",
     "_entry_note": "AT the open, t+0..t+3. The pre-open window was chosen on a look-ahead artifact; scored at the decision instant it is +0.00 to +0.66 c/sh (t~1) while t+0..t+3 is +1.21 to +2.19 (t 2.2-4.3) and t+4 falls to +0.24. See src/jumpscalp_preopen.py.",
     "_off_note": "OFF 2026-08-22 at the account owner's instruction after 4 live trades (+2.72 on three winners, -5.11 on one deadline exit, net -2.39). The entry and exit chain is working end to end; this is a decision about variance, not a defect. Re-enable by flipping the flag -- strategy code, tests and measurements are all left in place."
-  }
+  },
+  "_incident_note": "2026-08-22 20:14 UTC drawdown, -$45.89 on the day. Two causes, both mine: (1) families carried 15m, which NO verification covered -- the 8-day holdout study was --fam 5m only, so 15m markets were trading an unvalidated gate; (2) the 4:00-4:15 15m market and the 4:10-4:15 5m market OVERLAP IN TIME and both bought Up, so one wrong directional call cost -13.03 and -18.41 together while max_concurrent_markets counted them as two independent markets. Restricting to 5m fixes both: consecutive 5m endgame windows never overlap. Sizes cut to fit the REMAINING balance (~$23 after the drawdown, not the ~$60 rung 0 was built for) and the daily stop dropped to 15 to match. Re-raise only after the balance supports it AND src/pnl.py shows the 5m-only config tracking tape."
 }
