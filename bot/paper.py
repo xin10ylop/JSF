@@ -122,7 +122,8 @@ class PaperBroker:
                        if o["remaining"] > 0 and t_us <= o["expire_us"]]
 
     # ---- settlement ----------------------------------------------------
-    def taker_sell(self, slug, side_label, px, shares, meta=None):
+    def taker_sell(self, slug, side_label, px, shares, meta=None,
+                   fee_per_sh=None):
         """Close part or all of a position at `px`, booking realised P&L.
 
         Without this the jump-scalp's exits were invisible: the exit loop
@@ -136,6 +137,13 @@ class PaperBroker:
         Cost basis is reduced proportionally, so a partial exit leaves
         the remainder carrying its share of the original cost. Returns
         realised P&L in dollars.
+
+        `fee_per_sh` overrides the modelled 0.07*px*(1-px) taker fee.
+        Pass 0.0 for a MAKER fill: a resting sell that gets lifted pays
+        no venue fee, and at the scalp's exit price of ~0.60 that fee is
+        1.68c/share -- larger than the strategy's whole edge. Booking a
+        maker exit at the taker rate would show a working strategy as a
+        losing one.
         """
         key = (slug, side_label)
         pos = self.positions.get(key)
@@ -146,7 +154,7 @@ class PaperBroker:
             return 0.0
         frac = sh / pos["shares"] if pos["shares"] > 0 else 1.0
         basis = pos["cost"] * frac
-        fee = 0.07 * px * (1 - px)
+        fee = fee_per_sh if fee_per_sh is not None else 0.07 * px * (1 - px)
         proceeds = sh * (px - fee)
         pos["shares"] -= sh
         pos["cost"] -= basis

@@ -1841,11 +1841,23 @@ class Bot:
         actually sells, so this loop is the strategy -- an entry with a
         broken exit is a held-to-expiry bet at a coin-flip price.
 
-        Exits are marketable FAK limits (a floor price that crosses
-        resting bids immediately), never resting orders: a rested sell
-        depends on queue position, which is unverified here and is what
-        made ZMaker lose 22.8c/share. Measured with taker exits the
-        edge is +2.07c/sh out-of-sample, so nothing rests.
+        Two-stage exit. A sell RESTS at the target as soon as the entry
+        fills; at the deadline it is cancelled and the remainder is
+        crossed out with a marketable FAK.
+
+        Resting was previously refused here on the grounds that queue
+        position is unverified and is what made ZMaker lose 22.8c/share.
+        That objection is right in principle, so it was measured instead
+        of argued: scoring a resting exit as filled ONLY when a print
+        goes strictly THROUGH the target -- i.e. assuming we are last in
+        the queue at our own price -- the holdout is +1.44c/share against
+        +1.04c for crossing out every time. The optimistic fill
+        assumption gives +1.76c and is deliberately not relied on.
+
+        The ordering matters for safety: cancel must be confirmed, and
+        the order's final matched size re-read, BEFORE any FAK goes out.
+        Crossing while a resting sell might still be live would sell the
+        same shares twice, and the second sale would be naked.
         """
         while True:
             await asyncio.sleep(0.5)
@@ -1857,6 +1869,137 @@ class Bot:
                 if p is None or p["shares"] < 5.0:
                     self._scalps.pop(k, None)
                     continue
+                due = now >= p["deadline_us"]
+                loop = asyncio.get_running_loop()
+
+                # --- stage 1: rest a sell at the target, once ---------
+                if not due and not p.get("sell_oid") and not p.get("no_rest"):
+                    r = await loop.run_in_executor(
+                        self._order_pool,
+                        lambda pp=p: self.executor.submit_maker_sell(
+                            pp["token"], pp["shares"], pp["target"],
+                            slug=pp["slug"], outcome=pp["side"]))
+                    st = r.get("status")
+                    if st == "resting":
+                        p["sell_oid"] = r.get("order_id")
+                        p["maker_booked"] = 0.0
+                        self.log_decision({
+                            "kind": "scalp_rested", "slug": p["slug"],
+                            "side": p["side"], "shares": p["shares"],
+                            "target": round(p["target"], 4),
+                            "order_id": r.get("order_id")})
+                    elif st in ("filled", "partial"):
+                        # crossed on arrival: the bid was already above
+                        # our target, so WE took and the fee applies
+                        got = float(r.get("filled") or 0.0)
+                        px = r.get("avg_px") or p["target"]
+                        real = self.broker.taker_sell(p["slug"], p["side"],
+                                                      px, got)
+                        p["shares"] -= got
+                        self.log_decision({
+                            "kind": "scalp_exit", "slug": p["slug"],
+                            "side": p["side"], "entry": round(p["entry"], 4),
+                            "exit": px, "shares": got,
+                            "pnl_c": round(100 * (px - p["entry"]), 2),
+                            "realised": round(real, 4), "why": "cross_on_post"})
+                        if p["shares"] < 5.0:
+                            self._scalps.pop(k, None)
+                    else:
+                        # could not rest -- fall back to the taker path
+                        # rather than carry the binary to settlement
+                        p["no_rest"] = True
+                        self.log_decision({
+                            "kind": "scalp_rest_failed", "slug": p["slug"],
+                            "side": p["side"], "status": st,
+                            "detail": (r.get("detail") or "")[:120]})
+                    continue
+
+                # --- stage 2: has the resting sell been lifted? -------
+                if p.get("sell_oid") and (due or now - p.get("last_poll", 0)
+                                          >= 2_000_000):
+                    p["last_poll"] = now
+                    stt = await loop.run_in_executor(
+                        self._order_pool,
+                        lambda pp=p: self.executor.order_state(pp["sell_oid"]))
+                    if stt is not None:
+                        newly = stt["matched"] - p.get("maker_booked", 0.0)
+                        if newly > 1e-9:
+                            # maker fill: no venue fee. Booking it at the
+                            # taker rate would cost 1.68c/share at 0.60,
+                            # more than the edge.
+                            real = self.broker.taker_sell(
+                                p["slug"], p["side"],
+                                stt["price"] or p["target"], newly,
+                                fee_per_sh=0.0)
+                            p["maker_booked"] = stt["matched"]
+                            p["shares"] -= newly
+                            self.log_decision({
+                                "kind": "scalp_exit", "slug": p["slug"],
+                                "side": p["side"],
+                                "entry": round(p["entry"], 4),
+                                "exit": stt["price"] or p["target"],
+                                "shares": newly,
+                                "pnl_c": round(100 * ((stt["price"]
+                                                       or p["target"])
+                                                      - p["entry"]), 2),
+                                "realised": round(real, 4),
+                                "why": "target_maker"})
+                        if p["shares"] < 5.0:
+                            self._scalps.pop(k, None)
+                            continue
+
+                # --- stage 3: deadline -- cancel, THEN cross out ------
+                if due and p.get("sell_oid"):
+                    ok = await loop.run_in_executor(
+                        self._order_pool,
+                        lambda pp=p: self.executor.cancel_order(
+                            pp["sell_oid"]))
+                    stt = await loop.run_in_executor(
+                        self._order_pool,
+                        lambda pp=p: self.executor.order_state(pp["sell_oid"]))
+                    if stt is None and not ok:
+                        # We do not know whether the order is dead or
+                        # what it filled. Crossing now risks selling the
+                        # same shares twice, so retry instead.
+                        p["tries"] += 1
+                        self.log_decision({
+                            "kind": "scalp_exit_failed", "slug": p["slug"],
+                            "side": p["side"], "shares": p["shares"],
+                            "tries": p["tries"], "status": "cancel_unknown",
+                            "detail": "cancel unconfirmed and state "
+                                      "unreadable; not crossing"})
+                        if p["tries"] >= 20:
+                            self._scalps.pop(k, None)
+                        continue
+                    if stt is not None:
+                        newly = stt["matched"] - p.get("maker_booked", 0.0)
+                        if newly > 1e-9:
+                            real = self.broker.taker_sell(
+                                p["slug"], p["side"],
+                                stt["price"] or p["target"], newly,
+                                fee_per_sh=0.0)
+                            p["maker_booked"] = stt["matched"]
+                            p["shares"] -= newly
+                            self.log_decision({
+                                "kind": "scalp_exit", "slug": p["slug"],
+                                "side": p["side"],
+                                "entry": round(p["entry"], 4),
+                                "exit": stt["price"] or p["target"],
+                                "shares": newly, "realised": round(real, 4),
+                                "why": "target_maker_late"})
+                    p["sell_oid"] = None
+                    if p["shares"] < 5.0:
+                        self._scalps.pop(k, None)
+                        continue
+
+                # A resting sell is still live and we are not at the
+                # deadline. Never ALSO cross out here: that sells the
+                # same shares twice and the second sale is naked. The
+                # only paths below are "we could not rest" (no_rest) and
+                # "the resting order is cancelled and reconciled".
+                if p.get("sell_oid"):
+                    continue
+
                 m = self.state.markets.get(p["slug"])
                 bid = None
                 if m is not None:

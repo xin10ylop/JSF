@@ -84,13 +84,19 @@ def trades(recs, te, zmin=ZMIN, target=TARGET, exit_s=EXIT_S,
             continue
 
         tgt = entry + target
+        # A resting sell at tgt is at the BACK of the queue at that price.
+        # A print exactly AT tgt may be filling someone ahead of us, so
+        # "maker_strict" only counts a print that goes THROUGH the level.
+        # The difference is the whole ZMaker lesson (-22.8c/share on
+        # assumed queue position), so it is measured, not assumed.
+        strict = exit_style == "maker_strict"
         hit, last = False, None
         for ts, up, _sz, _sd in r["prints"]:
             if not (entry_ts < ts <= entry_ts + exit_s):
                 continue
             q = up if side_up else 1 - up
             last = q
-            if q >= tgt:
+            if (q > tgt + 1e-9) if strict else (q >= tgt):
                 hit = True
                 break
         if last is None:
@@ -98,7 +104,7 @@ def trades(recs, te, zmin=ZMIN, target=TARGET, exit_s=EXIT_S,
         # maker exit: the resting sell at the target is LIFTED, so no tick
         # and no exit fee -- this is the design the live bot implements.
         # A miss still has to cross out at the horizon.
-        if exit_style == "maker" and hit:
+        if exit_style in ("maker", "maker_strict") and hit:
             pnl = tgt - entry - FEE(entry)
         else:
             pnl = ((tgt if hit else last) - TICK) - entry - FEE(entry)

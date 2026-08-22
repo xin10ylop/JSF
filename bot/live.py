@@ -154,6 +154,110 @@ class LiveExecutor:
                 "filled": filled, "avg_px": avg_px, "order_id": oid,
                 "detail": status}
 
+    def submit_maker_sell(self, token_id, shares, price, slug=None,
+                          outcome=None):
+        """RESTING GTC sell at `price` -- the scalp's profit target.
+
+        create_limit_order signs order_type="GTC" when no expiration is
+        given, so posting the signed order WITHOUT the FAK replace that
+        submit_taker_sell does leaves it resting on the book.
+
+        Why rest at all, when the exit loop's docstring rightly warns
+        that queue position is what cost ZMaker 22.8c/share: because it
+        was measured rather than assumed. Scoring a resting exit as
+        filled ONLY when a print goes strictly THROUGH the target -- the
+        pessimistic queue assumption, we are last in line at our own
+        price -- still beats crossing out on the holdout, +1.44c/share
+        against +1.04c. The optimistic version is +1.76c; we are not
+        relying on it.
+
+        A resting sell also cannot be worse than the taker on price: it
+        is lifted at OUR limit or not at all, and the deadline sweep
+        crosses whatever is left. The risk it adds is an order left
+        alive on the book, which is why the caller must cancel before
+        force-selling -- see scalp_exit_loop.
+
+        Returns "resting" with an order_id when it sits, or the same
+        filled/partial shape as the taker path if it crosses on arrival.
+        """
+        px = round(float(price), 2)
+        if not (0.01 <= px <= 0.99):
+            self._emit("maker_sell_skip_tick", slug=slug, outcome=outcome,
+                       price=round(float(price), 4))
+            return {"status": "killed", "filled": 0.0, "avg_px": None,
+                    "order_id": None, "detail": f"price {px} outside tick"}
+        sh = round(math.floor(float(shares) * 100 + 1e-9) / 100.0, 2)
+        req = {"slug": slug, "token_id": str(token_id)[:16] + "...",
+               "side": "SELL", "outcome": outcome, "shares": sh,
+               "amount_usd": round(sh * px, 2), "price": px,
+               "resting": True}
+        if sh < 5.0:
+            self._emit("maker_sell_skip_min", **req)
+            return {"status": "killed", "filled": 0.0, "avg_px": None,
+                    "order_id": None, "detail": "below venue min"}
+        if self.shadow:
+            self._emit("shadow_maker_sell", **req)
+            return {"status": "shadow", "filled": 0.0, "avg_px": None,
+                    "order_id": None, "detail": "not sent"}
+        try:
+            signed = self.client.create_limit_order(
+                token_id=str(token_id), side="SELL",
+                price=f"{px:.2f}", size=f"{sh:.2f}")
+            r = self.client.post_order(signed)      # GTC -> rests
+        except Exception as e:  # noqa: BLE001
+            self._emit("maker_sell_error", err=repr(e)[:300], **req)
+            return {"status": "error", "filled": 0.0, "avg_px": None,
+                    "order_id": None, "detail": repr(e)[:300]}
+        if not getattr(r, "ok", False):
+            self._emit("maker_sell_rejected", code=getattr(r, "code", None),
+                       message=str(getattr(r, "message", ""))[:300], **req)
+            return {"status": "rejected", "filled": 0.0, "avg_px": None,
+                    "order_id": None,
+                    "detail": f"{getattr(r, 'code', '')}: "
+                              f"{getattr(r, 'message', '')}"}
+        oid = getattr(r, "order_id", None)
+        making = float(getattr(r, "making_amount", 0) or 0)   # shares out
+        taking = float(getattr(r, "taking_amount", 0) or 0)   # dollars in
+        status = str(getattr(r, "status", "") or "")
+        self._emit("maker_sell_posted", order_id=oid, status=status,
+                   making=making, taking=taking, **req)
+        if making > 0:
+            return {"status": "filled" if making >= sh - 1e-9 else "partial",
+                    "filled": making,
+                    "avg_px": round(taking / making, 6),
+                    "order_id": oid, "detail": status}
+        return {"status": "resting", "filled": 0.0, "avg_px": None,
+                "order_id": oid, "detail": status or "live"}
+
+    def order_state(self, order_id):
+        """(matched, size, status) for one order, or None if unreadable.
+
+        Used to learn what a resting sell actually did. None means "we
+        do not know" and callers must NOT treat it as zero -- selling
+        again on an unknown state is the double-sell path.
+        """
+        try:
+            o = self.client.get_order(order_id=str(order_id))
+        except Exception as e:  # noqa: BLE001
+            self._emit("order_state_err", order_id=str(order_id),
+                       err=repr(e)[:200])
+            return None
+        return {"matched": float(getattr(o, "size_matched", 0) or 0),
+                "size": float(getattr(o, "original_size", 0) or 0),
+                "price": float(getattr(o, "price", 0) or 0),
+                "status": str(getattr(o, "status", "") or "")}
+
+    def cancel_order(self, order_id):
+        """Cancel one resting order. True only on a confirmed cancel."""
+        try:
+            self.client.cancel_order(order_id=str(order_id))
+        except Exception as e:  # noqa: BLE001
+            self._emit("cancel_err", order_id=str(order_id),
+                       err=repr(e)[:200])
+            return False
+        self._emit("cancelled", order_id=str(order_id))
+        return True
+
     def submit_taker(self, token_id, side, shares, max_price, slug=None,
                      outcome=None):
         """FAK buy of `shares` of `token_id` capped at `max_price`.
