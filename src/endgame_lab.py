@@ -59,7 +59,18 @@ def prep(r, w=30.0):
 
 
 def z_at(path, K, te, t0, t1, sigma_rel, w=30.0):
-    """bot/state.py::zscore, in-window branch (rem <= w)."""
+    """bot/state.py::zscore. Both branches.
+
+    rem <= w  -- inside the settle window: part of the average is
+    already realised, so only `rem` seconds still move it and the
+    unrealised part has sd sigma*sqrt(rem^3/3). That variance collapse
+    IS the strategy's edge.
+
+    rem > w   -- before the window opens: nothing of the average is
+    realised yet, sd is sigma*sqrt(s + w/3) with s = (t1-w) - te. The
+    strategy refuses to trade here; this branch exists so the refusal
+    can be MEASURED rather than assumed.
+    """
     spot = None
     for u in range(te, te - 6, -1):
         if u in path:
@@ -68,8 +79,13 @@ def z_at(path, K, te, t0, t1, sigma_rel, w=30.0):
     if spot is None:
         return None
     rem = t1 - te
-    if rem <= 0 or rem > w:
+    if rem <= 0:
         return None
+    sigma_pre = sigma_rel * spot
+    if rem > w:
+        s_pre = (t1 - w) - te
+        sd_pre = sigma_pre * math.sqrt(max(s_pre, 0.0) + w / 3.0)
+        return (spot - K) / sd_pre if sd_pre > 0 else None
     r_sum = 0.0
     n_hole = 0
     for u in range(int(t1 - w), te):
@@ -112,7 +128,7 @@ def replay(recs, zmin=2.0, max_price=0.97, min_price=0.0, edge_min=0.02,
         path, K = pr
         t0, t1 = r["t0"], r["t1"]
         prints = r["prints"]
-        hi = int(min(window_s, w))
+        hi = int(window_s)
         sig = None                            # first qualifying signal
         fill = None                           # first FAK that matched
         for te in range(int(t1 - hi), int(t1 - min_rem_s) + 1):
