@@ -553,13 +553,22 @@ class JumpScalp:
         self.zmin = cfg.get("zmin", 0.15)
         self.mom_s = cfg.get("mom_s", 10)
         self.size = cfg.get("size", 8)
-        # PRE-open by default. Measured out-of-sample on btc, entry by
-        # window: t-20..-10 +5.45c/sh (t=24.7), t-10..0 +4.88c,
-        # t0..+5 +2.65c. The edge is largest before the market
-        # re-prices and collapses once it has; buying after the open --
-        # the first version of this class -- gave away more than half.
-        self.entry_lo = cfg.get("entry_lo", -20.0)
-        self.entry_hi = cfg.get("entry_hi", -10.0)
+        # AT the open. The pre-open default this replaces was justified by
+        # t-20..-10 = +5.45c/sh (t=24.7), which was a look-ahead artifact:
+        # trades() picked the side from the spot AT the open while claiming
+        # to decide up to 20s earlier. Scored at the decision instant
+        # (src/jumpscalp_preopen.py, 2263 markets, 40% holdout, maker exit)
+        # the ordering reverses and the pre-open edge disappears:
+        #
+        #   t-12 +0.66 (t=1.1)   t-2 +0.00 (t=0.0)
+        #   t+0  +1.65 (t=3.2)   t+1 +2.19 (t=4.3)
+        #   t+2  +1.21 (t=2.2)   t+3 +1.98 (t=3.8)   t+4 +0.24 (t=0.4)
+        #
+        # t+0..t+3 is four consecutive positive seconds, not one lucky
+        # bucket, and it falls off at t+4 -- so the window is bounded on
+        # both sides by measurement rather than by preference.
+        self.entry_lo = cfg.get("entry_lo", 0.0)
+        self.entry_hi = cfg.get("entry_hi", 3.0)
         self.open_window_s = cfg.get("open_window_s", 5.0)   # legacy
         self.min_price = cfg.get("min_price", 0.30)
         self.max_price = cfg.get("max_price", 0.70)
