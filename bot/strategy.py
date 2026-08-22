@@ -588,11 +588,18 @@ class JumpScalp:
             return None
         self.f["z_pass"] += 1
         # side from short-horizon spot momentum: the venue lags spot
-        now_s = t_us / 1e6
+        #
+        # oracle_hist holds (round_ts_us, px) in MICROSECONDS -- on_oracle
+        # stores round_ts_ms * 1000. Comparing it against a seconds-valued
+        # clock made every difference about -1.8e15, so `>= mom_s` was
+        # never true, `back` stayed None, and evaluate() returned before
+        # incrementing its own `mom` counter. Live: z_pass=19, mom=0, and
+        # the strategy could not fire at all. Compare in one unit.
+        cutoff_us = t_us - self.mom_s * 1_000_000
         spot = state.spot_adj()
         back = None
         for ts, px in reversed(state.oracle_hist):
-            if now_s - ts >= self.mom_s:
+            if ts <= cutoff_us:
                 back = px
                 break
         if spot is None or back is None:
