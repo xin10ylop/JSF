@@ -98,6 +98,7 @@ def main():
              (0.90, 1.0)]
     stat = {p: defaultdict(lambda: [0, 0]) for p in pads}   # band->[att,fill]
     empty_side = [0, 0]                                     # [checks, empty]
+    depths = []
 
     rembuckets = [(2, 5), (5, 10), (10, 20), (20, 30)]
     byrem = {p: defaultdict(lambda: [0, 0]) for p in pads}
@@ -134,6 +135,8 @@ def main():
                     limit = min(A + pad, 0.99)
                     got = depth_at_or_below(lv_next, limit)
                     hit = got >= a.need
+                    if pad == pads[-1]:
+                        depths.append(got)
                     st = stat[pad][band]
                     st[0] += 1
                     st[1] += hit
@@ -172,6 +175,14 @@ def main():
             att, fil = byrem[p][rb]
             cells += f"   {100 * fil / att:>5.0f}%" if att else "       -"
         print(f"  {rb[0]:>2}-{rb[1]:<3}{n:>7}{cells}")
+    if depths:
+        d = sorted(depths)
+        q = lambda f: d[min(len(d) - 1, int(f * len(d)))]  # noqa: E731
+        print(f"\n  executable depth at our limit (shares): p10={q(.10):.0f} "
+              f"p25={q(.25):.0f} med={q(.50):.0f} p75={q(.75):.0f}")
+        thin = sum(1 for x in d if x < 40)
+        print(f"  snapshots with <40sh resting (a race we could lose on an "
+              f"8sh order): {100 * thin / len(d):.0f}%")
     tot = {p: [sum(v[0] for v in stat[p].values()),
                sum(v[1] for v in stat[p].values())] for p in pads}
     cells = "".join(f"   {100 * tot[p][1] / tot[p][0]:>5.0f}%"
