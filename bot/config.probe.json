@@ -6,10 +6,10 @@
   "15m": 900
  },
  "risk": {
-  "max_market_shares": 8,
-  "max_market_dollars": 5.5,
-  "max_concurrent_markets": 2,
-  "daily_loss_limit": 12.0,
+  "max_market_shares": 25,
+  "max_market_dollars": 12.0,
+  "max_concurrent_markets": 3,
+  "daily_loss_limit": 20.0,
   "stale_oracle_s": 5.0,
   "stale_book_s": 10.0,
   "halt": {
@@ -20,7 +20,7 @@
    "probe_markets": 10,
    "probe_losses": 3
   },
-  "_micro_note": "FILL PROBE sizing. The venue minimum is 5 shares, so max_market_dollars must cover 5 shares at the TOP of our price band (5 x 0.99 = $4.95) or every expensive signal is silently skipped as below-minimum and the probe measures only cheap fills. The point is not profit: real orders are the ONLY way to measure the kill:fill ratio -- shadow skips _dispatch_live entirely (its guards, the venue's 250ms hold, the race for resting liquidity), which is exactly why paper said +$1.3k/day while live lost money. Caps are PER PROCESS: one coin risks the $12 stop, three coins risk $36."
+  "_micro_note": "Two live strategies on a ~$68 wallet. The risk block is GLOBAL, not per-strategy, so this sizes the COMBINED book: 3 concurrent x $12 = $36 worst-case committed, about half the bankroll, with the rest as settlement buffer. They rarely collide -- jumpscalp fires in a market's first 5s and is flat within 30s; rollavg fires in its last 30s. Daily stop $20: jumpscalp alone runs ~63 trades/day at 20sh, so a normal day swings roughly +/-$13 around an expected +$26 -- a tighter stop would fire on noise, a looser one is a third of the wallet."
  },
  "rollavg_edge": {
   "enabled": true,
@@ -93,13 +93,13 @@
  "desync_gap": 0.15,
  "_desync_note": "Blocks a signal whose price disagrees with the venue's OWN last print by more than this. Replaces a model-disagreement check that silently halved the strategy: calib.py's p_up spans [0.1833, 0.9159], so a Down contract can never be valued above 0.8167 and every Down favourite at 0.97-0.99 scored ev -0.17 and was blocked, while the identical Up trade at -0.075 passed. Measured live: 10 blocks, all Down. The guard's real job is a frozen book view (launch day: ours stuck at 0.99 while the venue traded 0.022), which a print comparison catches directly.",
  "jumpscalp": {
-  "enabled": false,
+  "enabled": true,
   "coins": [
    "btc"
   ],
   "zmin": 0.15,
   "mom_s": 10,
-  "size": 8,
+  "size": 20,
   "open_window_s": 5.0,
   "min_price": 0.3,
   "max_price": 0.7,
