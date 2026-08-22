@@ -65,7 +65,8 @@ def main():
     recs = tail_records(dec, {"health", "live_miss", "taker_miss",
                               "scalp_exit", "scalp_exit_failed",
                               "live_balance", "redeem_err",
-                              "redeem_list_err", "cash_kill"})
+                              "redeem_list_err", "cash_kill",
+                              "scalp_rested", "scalp_rest_failed"})
     heals = [r for r in recs if r.get("kind") == "health"]
     h = heals[-1] if heals else None
     if h is None:
@@ -205,10 +206,27 @@ def main():
         tot = sum(e.get("realised", 0) or 0 for e in done)
         print(f"\nSCALP EXITS  ok={len(done)}  failed={len(fail)}  "
               f"realised=${tot:+.2f}")
+        # Per-scalp chain. A scalp is capped at +9c on the upside and
+        # UNCAPPED on the downside -- it exits at whatever the book pays
+        # at t+30 -- so one bad exit erases several good ones. Showing
+        # entry/target/exit together is the only way to see whether a
+        # loss was the strategy working as designed or the exit failing.
+        rested = [r for r in recs if r.get("kind") == "scalp_rested"]
+        restf = [r for r in recs if r.get("kind") == "scalp_rest_failed"]
+        print(f"  resting sells posted={len(rested)} failed={len(restf)}"
+              + (f"  (settled after {med([x.get('tries') for x in rested])}"
+                 f" ticks)" if rested else ""))
+        for r in restf[-2:]:
+            print(f"    rest_failed tries={r.get('tries')} "
+                  f"gave_up={r.get('gave_up')} {(r.get('detail') or '')[:90]}")
         for e in done[-5:]:
             # the log key is `exit`, not `px`
-            print(f"  why={e.get('why'):<18} exit={e.get('exit')} "
-                  f"sh={e.get('shares')} realised={e.get('realised')}")
+            en, ex = e.get("entry"), e.get("exit")
+            move = (f"{100*(ex-en):+.1f}c" if isinstance(en, (int, float))
+                    and isinstance(ex, (int, float)) else "?")
+            print(f"  why={e.get('why'):<18} entry={en} exit={ex} "
+                  f"({move})  sh={e.get('shares')} "
+                  f"realised={e.get('realised')}")
         if not any(e.get("why", "").startswith("target_maker") for e in done):
             print("  NOTE: no maker exits -- the resting sell is not "
                   "working; these are taker fallbacks")
