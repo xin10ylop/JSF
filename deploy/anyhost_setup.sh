@@ -65,11 +65,20 @@ if [ ! -x "$PY" ]; then
   python3 -m venv "$DIR/.venv"
 fi
 "$DIR/.venv/bin/pip" install -q -U pip
-"$DIR/.venv/bin/pip" install -q numpy websockets aiohttp requests \
+"$DIR/.venv/bin/pip" install -q numpy scipy websockets aiohttp requests \
   python-dotenv 'polymarket-client>=0.6'
-"$PY" -c "import numpy, websockets, aiohttp, requests, dotenv, polymarket" \
-  || { echo "FATAL: dependency install failed"; exit 1; }
-echo "    deps OK"
+# Import-check the PRICER, not just the package list. scipy reaches the
+# trading path only through src/rollavg_pricer.py, which bot/state.py
+# loads lazily via a sys.path insert -- so a scan of bot/*.py misses it
+# and the bot starts fine, then throws ModuleNotFoundError on EVERY
+# evaluation. That failure is silent in the worst way: the process is
+# up, the feeds connect, and not one order is ever sent.
+"$PY" -c "import numpy, scipy, websockets, aiohttp, requests, dotenv, polymarket
+import sys; sys.path.insert(0, '$DIR/src')
+from rollavg_pricer import fair
+from bot.calib import p_up
+print('    deps + pricer OK')" || {
+  echo "FATAL: dependency or pricer import failed"; exit 1; }
 
 echo "==> credentials"
 if [ -n "$POLYMARKET_PRIVATE_KEY" ]; then
