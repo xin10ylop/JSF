@@ -1,114 +1,114 @@
 {
- "mode": "live",
- "_mode_note": "LIVE as of 2026-08-19 ~19:20 UTC, btc first (staged: eth, then sol, each after the previous is stable for ~a day). Shadow verified on all three coins: correct token per side vs gamma, exact dollar math, caps respected; btc's clean hour showed 243 signals with zero pricing-integrity rejections. The paper btc bot keeps running as the frozen baseline for src/live_vs_paper.py.",
- "families": {
-  "5m": 300,
-  "15m": 900
- },
- "risk": {
-  "max_market_shares": 25,
-  "max_market_dollars": 12.0,
-  "max_concurrent_markets": 3,
-  "daily_loss_limit": 20.0,
-  "stale_oracle_s": 5.0,
-  "stale_book_s": 10.0,
-  "halt": {
-   "streak_n": 20,
-   "streak_losses": 6,
-   "cooloff_s": 7200,
-   "resume_frac": 0.5,
-   "probe_markets": 10,
-   "probe_losses": 3
+  "mode": "live",
+  "_mode_note": "LIVE as of 2026-08-19 ~19:20 UTC, btc first (staged: eth, then sol, each after the previous is stable for ~a day). Shadow verified on all three coins: correct token per side vs gamma, exact dollar math, caps respected; btc's clean hour showed 243 signals with zero pricing-integrity rejections. The paper btc bot keeps running as the frozen baseline for src/live_vs_paper.py.",
+  "families": {
+    "5m": 300,
+    "15m": 900
   },
-  "_micro_note": "Two live strategies on a ~$68 wallet. The risk block is GLOBAL, not per-strategy, so this sizes the COMBINED book: 3 concurrent x $12 = $36 worst-case committed, about half the bankroll, with the rest as settlement buffer. They rarely collide -- jumpscalp fires in a market's first 5s and is flat within 30s; rollavg fires in its last 30s. Daily stop $20: jumpscalp alone runs ~63 trades/day at 20sh, so a normal day swings roughly +/-$13 around an expected +$26 -- a tighter stop would fire on noise, a looser one is a third of the wallet."
- },
- "rollavg_edge": {
-  "enabled": true,
-  "_disabled_note": "OFF as of 2026-08-20: the endgame taker is retired from live. Micro-live measured its structural problem directly -- adverse fill selection (171 kills vs 14 fills; fills avg px 0.296 vs paper 0.857) -- and the filtered variant traded too rarely to pay for its tail risks. EarlyBird replaces it as the sole real-money strategy: same model, opposite end of the window, where the book is two-sided and the strike is already formed. Retiring it also frees both concurrency slots for consecutive EarlyBird holds and removes the endgame-only failure paths (concurrent unknown resolutions on one token, post-drop orphan fills). The paper bot keeps the unfiltered endgame as the frozen control for live_vs_paper.",
-  "window_s": 60,
-  "zmin": 2.0,
-  "edge_min": 0.02,
-  "size": 8,
-  "max_price": 0.99,
-  "min_rem_s": 2.0,
-  "require_edge": false,
-  "cooldown_s": 0.0,
-  "skip_px": null,
-  "min_price": 0.0,
-  "_size_note": "10 shares (~$9 at typical fill px) against paper's 100. Every GATE is identical to the frozen paper config -- same zmin, same max_price, same window -- so live and paper disagree only about execution, which is the one thing micro-live exists to measure. The venue min is 5 shares; risk room below that is logged as live_miss/below_venue_min, not sent.",
-  "_require_edge_note": "ON for LIVE as of 2026-08-20 (paper keeps it OFF as the control). Live measured adverse fill selection the tape cannot show: 171 kills vs 14 fills overnight, with fills averaging px 0.296 vs paper's 0.857 -- the venue fills us eagerly when the quote is going bad and starves us when it's right. require_edge only buys when ask <= empirical_fair - edge_min (2c), the pre-measured +10.15c/sh filter (3x per-share edge on ~1/5 volume): trades that are mispriced in OUR favor, which adverse selection cannot punish. The divergence report A/Bs this against the unfiltered paper baseline.",
-  "_relaunch_note": "RE-ENABLED 2026-08-21 with the padded marketable limit. It was retired on 08-20 for adverse fill selection; that turned out to be an EXECUTION defect (unpadded limit + a round() that put the limit UNDER the ask above 0.96), not a defect of the prediction. Print-proof pooled: +5.51c/sh t=3.02, 7/9 days positive, holdout Aug18-21 +4.44c/sh; ~25 trades/day at the current micro caps. Entries skew cheap (avg 0.213) so per-trade variance is high: the daily stop, not the per-trade size, is the real risk control.",
-  "_gate_note": "PAPER gate, unchanged: require_edge false, max_price 0.99, zmin 2.0. This is the configuration to fix and measure, not to redesign. It was briefly switched to require_edge after four live trades lost -- a 4-fill sample against a 628-fill measurement (+3.24c/sh, t=2.99, 8/9 days positive) on a strategy whose per-share sd is 34c. That override was not justified by the evidence and is reverted. Capacity note: the deep book sits at 0.96-0.99 (10k+ shares resting, book probe median depth 33,767), which is exactly the band this gate trades, so size is limited by the edge holding at scale, not by liquidity."
- },
- "coin": "btc",
- "coins": [
-  "btc",
-  "eth",
-  "sol"
- ],
- "_coins_note": "Live roster per the strict-model gate: btc/eth/sol passed (6 days, t=+7.99 aggregate). xrp is excluded (-0.16c/sh strict), doge held back as paper-only until its +0.57 firms up.",
- "venue_hold_ms": 250,
- "rtt_ms": 160,
- "_latency_note": "Used by the paper half of shadow mode only. In live mode no simulated latency is added: the venue's real 250ms hold and the real Amsterdam rtt replace the model.",
- "fill": {
-  "participation": 0.5,
-  "vol_participation": 0.25,
-  "vol_window_s": 5.0,
-  "reject_rate": 0.01,
-  "min_order_size": 5.0,
-  "use_tape_cap": true
- },
- "_fill_note": "Drives the paper simulation inside shadow mode and min_order_size (the venue's orderMinSize) in live mode. The rest is ignored by the live path: reality fills real orders.",
- "zmaker": {
-  "enabled": true,
-  "window_s": 90,
-  "zmin": 2.0,
-  "margin": 0.03,
-  "size": 10,
-  "ttl_s": 10,
-  "min_rem_s": 8,
-  "max_level": 0.97,
-  "min_level": 0.05,
-  "requote_c": 0.01,
-  "_note": "MEASUREMENT ONLY -- simulated against real trade prints in an isolated ledger (maker_fills.jsonl / maker_sim_settled lines), never touching the real-money broker or risk. Rationale: 24h of live takers measured adverse fill selection (171 kills vs 14 fills; fills at avg 0.296 vs paper 0.857) -- the favourite's ask side empties in the final 30s, so the taker leg starves where the edge is largest. The maker leg rests a bid at fair-minus-3c on the favoured side, TTL 10s, cancel-and-replace, never resting into the final 3s. Maker fills on prints are the HONEST direction of simulation (prints are executed volume). If a few days measure it positive at meaningful volume, the real maker executor gets built."
- },
- "earlybird": {
-  "enabled": false,
+  "risk": {
+    "max_market_shares": 25,
+    "max_market_dollars": 12.0,
+    "max_concurrent_markets": 3,
+    "daily_loss_limit": 20.0,
+    "stale_oracle_s": 5.0,
+    "stale_book_s": 10.0,
+    "halt": {
+      "streak_n": 20,
+      "streak_losses": 6,
+      "cooloff_s": 7200,
+      "resume_frac": 0.5,
+      "probe_markets": 10,
+      "probe_losses": 3
+    },
+    "_micro_note": "Two live strategies on a ~$68 wallet. The risk block is GLOBAL, not per-strategy, so this sizes the COMBINED book: 3 concurrent x $12 = $36 worst-case committed, about half the bankroll, with the rest as settlement buffer. They rarely collide -- jumpscalp fires in a market's first 5s and is flat within 30s; rollavg fires in its last 30s. Daily stop $20: jumpscalp alone runs ~63 trades/day at 20sh, so a normal day swings roughly +/-$13 around an expected +$26 -- a tighter stop would fire on noise, a looser one is a third of the wallet."
+  },
+  "rollavg_edge": {
+    "enabled": true,
+    "_disabled_note": "OFF as of 2026-08-20: the endgame taker is retired from live. Micro-live measured its structural problem directly -- adverse fill selection (171 kills vs 14 fills; fills avg px 0.296 vs paper 0.857) -- and the filtered variant traded too rarely to pay for its tail risks. EarlyBird replaces it as the sole real-money strategy: same model, opposite end of the window, where the book is two-sided and the strike is already formed. Retiring it also frees both concurrency slots for consecutive EarlyBird holds and removes the endgame-only failure paths (concurrent unknown resolutions on one token, post-drop orphan fills). The paper bot keeps the unfiltered endgame as the frozen control for live_vs_paper.",
+    "window_s": 60,
+    "zmin": 2.0,
+    "edge_min": 0.02,
+    "size": 8,
+    "max_price": 0.99,
+    "min_rem_s": 2.0,
+    "require_edge": false,
+    "cooldown_s": 0.0,
+    "skip_px": null,
+    "min_price": 0.0,
+    "_size_note": "10 shares (~$9 at typical fill px) against paper's 100. Every GATE is identical to the frozen paper config -- same zmin, same max_price, same window -- so live and paper disagree only about execution, which is the one thing micro-live exists to measure. The venue min is 5 shares; risk room below that is logged as live_miss/below_venue_min, not sent.",
+    "_require_edge_note": "ON for LIVE as of 2026-08-20 (paper keeps it OFF as the control). Live measured adverse fill selection the tape cannot show: 171 kills vs 14 fills overnight, with fills averaging px 0.296 vs paper's 0.857 -- the venue fills us eagerly when the quote is going bad and starves us when it's right. require_edge only buys when ask <= empirical_fair - edge_min (2c), the pre-measured +10.15c/sh filter (3x per-share edge on ~1/5 volume): trades that are mispriced in OUR favor, which adverse selection cannot punish. The divergence report A/Bs this against the unfiltered paper baseline.",
+    "_relaunch_note": "RE-ENABLED 2026-08-21 with the padded marketable limit. It was retired on 08-20 for adverse fill selection; that turned out to be an EXECUTION defect (unpadded limit + a round() that put the limit UNDER the ask above 0.96), not a defect of the prediction. Print-proof pooled: +5.51c/sh t=3.02, 7/9 days positive, holdout Aug18-21 +4.44c/sh; ~25 trades/day at the current micro caps. Entries skew cheap (avg 0.213) so per-trade variance is high: the daily stop, not the per-trade size, is the real risk control.",
+    "_gate_note": "PAPER gate, unchanged: require_edge false, max_price 0.99, zmin 2.0. This is the configuration to fix and measure, not to redesign. It was briefly switched to require_edge after four live trades lost -- a 4-fill sample against a 628-fill measurement (+3.24c/sh, t=2.99, 8/9 days positive) on a strategy whose per-share sd is 34c. That override was not justified by the evidence and is reverted. Capacity note: the deep book sits at 0.96-0.99 (10k+ shares resting, book probe median depth 33,767), which is exactly the band this gate trades, so size is limited by the edge holding at scale, not by liquidity."
+  },
+  "coin": "btc",
   "coins": [
-   "btc"
+    "btc",
+    "eth",
+    "sol"
   ],
-  "zmin": 0.3,
-  "size": 15,
-  "open_window_s": 45,
-  "max_price": 0.8,
-  "min_price": 0.3,
-  "_note": "DISABLED 2026-08-21 after out-of-sample judgment. Pre-committed holdout (Aug 15-20, paginated tape, 1594 btc / 1467 sol markets): btc zmin0.5 +3.98c/sh t=0.82 (bar was +5c), as-deployed-with-strike-latch +1.96c, at the live sigma threshold +0.23c ~= zero; sol +2.97c t=0.88, 3/6 days. Aug-21 fresh slice negative. The original +14.3c was a trades-API truncation artifact (1000-row cap, newest-first) plus in-sample selection. Do not re-enable without a NEW edge measured on paginated tape through pre-committed bars."
- },
- "taker_pad": 0.05,
- "taker_pad_min_edge": 0.005,
- "taker_pad_max_price": 0.99,
- "_taker_pad_note": "Marketable-limit padding: the fix for one-way fill selection. A CLOB fills a taker at the RESTING maker's price and this venue re-validates after its 250ms taker hold, so a limit set to exactly the ask we saw dies to any uptick in flight -- meaning we filled when the price fell (wrong) and were killed when it rose (right). Measured live: 171 kills / 14 fills, fills avg 0.296 vs paper 0.857. Padding pays the ask when the book is unchanged and still matches when it moved, Bounded three ways: relative to price (taker_pad_rel, so a flat 5c cannot become a 167% overpay on a 3c ask), absolutely (taker_pad), and by value (paying the limit in full must still leave taker_pad_min_edge after fee). Sizing runs on the PADDED limit because a BUY here is rate-based -- size x limit is the cash committed -- so the per-market dollar cap binds on money that can actually leave. Print-proof measurement, 6788 markets x 3 coins x 9 days: fill rate 68->89% (btc), 44->67% (eth), 33->54% (sol); pooled deployed gate +3.37c/sh t=1.75 -> +5.51c/sh t=3.02.",
- "taker_pad_rel": 0.25,
- "_probe_note": "Probe config: identical gate and padding to config.live.json, sized so an hour of real orders answers the fill question for a few dollars. Graduate to config.live.json sizing only after the measured kill:fill ratio beats 5:1.",
- "desync_gap": 0.15,
- "_desync_note": "Blocks a signal whose price disagrees with the venue's OWN last print by more than this. Replaces a model-disagreement check that silently halved the strategy: calib.py's p_up spans [0.1833, 0.9159], so a Down contract can never be valued above 0.8167 and every Down favourite at 0.97-0.99 scored ev -0.17 and was blocked, while the identical Up trade at -0.075 passed. Measured live: 10 blocks, all Down. The guard's real job is a frozen book view (launch day: ours stuck at 0.99 while the venue traded 0.022), which a print comparison catches directly.",
- "jumpscalp": {
-  "enabled": true,
-  "coins": [
-   "btc"
-  ],
-  "zmin": 0.15,
-  "mom_s": 10,
-  "size": 20,
-  "open_window_s": 5.0,
-  "min_price": 0.3,
-  "max_price": 0.7,
-  "target": 0.09,
-  "exit_s": 30.0,
-  "_note": "PRE-OPEN entry at t-20..t-10, exit +9c or flat 30s later, never at settlement. Direction from the sign of z with 10s momentum required to agree. HONEST out-of-sample btc, signals computed strictly as of the decision moment: +2.78c/sh t=4.9 at t-20, +2.64c t=5.4 at t-10, +2.65c t=5.6 at t0. An earlier measurement claimed +5.45c t=24.7 for the pre-open entry; it read spot and momentum AT t0 to decide at t-20, i.e. 20 seconds of look-ahead, and the 'earlier is much better' decay it produced was the leak's fingerprint. Corrected, pre-open and at-open are about equal and the edge is roughly half. Pre-open is kept because the book there is verifiably deep (643sh at the touch, 250sh at 0.00c slippage). NOT ESTABLISHED on eth/sol; btc only.",
-  "entry_lo": -12.0,
-  "entry_hi": -2.0,
-  "dir_mode": "both",
-  "_entry_note": "Entry t-12..t-2. The three candidate windows are statistically indistinguishable out-of-sample (t-20 +2.78c, t-10 +2.64c, t0 +2.65c) and book depth could not separate them either -- every window showed the same ~555sh at the touch and 0.00c slippage on 250 shares, on only 2 markets. So the tiebreaker is whether the bot can PRICE the market that early: the strike is the mean over [t0-30, t0) and needs >=3 oracle ticks, which at ~0.2-1.0 ticks/s is marginal at t-20 (10s elapsed) and safe by t-12 (18s). This window keeps the pre-open entry while giving the strike time to exist."
- }
+  "_coins_note": "Live roster per the strict-model gate: btc/eth/sol passed (6 days, t=+7.99 aggregate). xrp is excluded (-0.16c/sh strict), doge held back as paper-only until its +0.57 firms up.",
+  "venue_hold_ms": 250,
+  "rtt_ms": 160,
+  "_latency_note": "Used by the paper half of shadow mode only. In live mode no simulated latency is added: the venue's real 250ms hold and the real Amsterdam rtt replace the model.",
+  "fill": {
+    "participation": 0.5,
+    "vol_participation": 0.25,
+    "vol_window_s": 5.0,
+    "reject_rate": 0.01,
+    "min_order_size": 5.0,
+    "use_tape_cap": true
+  },
+  "_fill_note": "Drives the paper simulation inside shadow mode and min_order_size (the venue's orderMinSize) in live mode. The rest is ignored by the live path: reality fills real orders.",
+  "zmaker": {
+    "enabled": true,
+    "window_s": 90,
+    "zmin": 2.0,
+    "margin": 0.03,
+    "size": 10,
+    "ttl_s": 10,
+    "min_rem_s": 8,
+    "max_level": 0.97,
+    "min_level": 0.05,
+    "requote_c": 0.01,
+    "_note": "MEASUREMENT ONLY -- simulated against real trade prints in an isolated ledger (maker_fills.jsonl / maker_sim_settled lines), never touching the real-money broker or risk. Rationale: 24h of live takers measured adverse fill selection (171 kills vs 14 fills; fills at avg 0.296 vs paper 0.857) -- the favourite's ask side empties in the final 30s, so the taker leg starves where the edge is largest. The maker leg rests a bid at fair-minus-3c on the favoured side, TTL 10s, cancel-and-replace, never resting into the final 3s. Maker fills on prints are the HONEST direction of simulation (prints are executed volume). If a few days measure it positive at meaningful volume, the real maker executor gets built."
+  },
+  "earlybird": {
+    "enabled": false,
+    "coins": [
+      "btc"
+    ],
+    "zmin": 0.3,
+    "size": 15,
+    "open_window_s": 45,
+    "max_price": 0.8,
+    "min_price": 0.3,
+    "_note": "DISABLED 2026-08-21 after out-of-sample judgment. Pre-committed holdout (Aug 15-20, paginated tape, 1594 btc / 1467 sol markets): btc zmin0.5 +3.98c/sh t=0.82 (bar was +5c), as-deployed-with-strike-latch +1.96c, at the live sigma threshold +0.23c ~= zero; sol +2.97c t=0.88, 3/6 days. Aug-21 fresh slice negative. The original +14.3c was a trades-API truncation artifact (1000-row cap, newest-first) plus in-sample selection. Do not re-enable without a NEW edge measured on paginated tape through pre-committed bars."
+  },
+  "taker_pad": 0.05,
+  "taker_pad_min_edge": 0.005,
+  "taker_pad_max_price": 0.99,
+  "_taker_pad_note": "Marketable-limit padding: the fix for one-way fill selection. A CLOB fills a taker at the RESTING maker's price and this venue re-validates after its 250ms taker hold, so a limit set to exactly the ask we saw dies to any uptick in flight -- meaning we filled when the price fell (wrong) and were killed when it rose (right). Measured live: 171 kills / 14 fills, fills avg 0.296 vs paper 0.857. Padding pays the ask when the book is unchanged and still matches when it moved, Bounded three ways: relative to price (taker_pad_rel, so a flat 5c cannot become a 167% overpay on a 3c ask), absolutely (taker_pad), and by value (paying the limit in full must still leave taker_pad_min_edge after fee). Sizing runs on the PADDED limit because a BUY here is rate-based -- size x limit is the cash committed -- so the per-market dollar cap binds on money that can actually leave. Print-proof measurement, 6788 markets x 3 coins x 9 days: fill rate 68->89% (btc), 44->67% (eth), 33->54% (sol); pooled deployed gate +3.37c/sh t=1.75 -> +5.51c/sh t=3.02.",
+  "taker_pad_rel": 0.25,
+  "_probe_note": "Probe config: identical gate and padding to config.live.json, sized so an hour of real orders answers the fill question for a few dollars. Graduate to config.live.json sizing only after the measured kill:fill ratio beats 5:1.",
+  "desync_gap": 0.15,
+  "_desync_note": "Blocks a signal whose price disagrees with the venue's OWN last print by more than this. Replaces a model-disagreement check that silently halved the strategy: calib.py's p_up spans [0.1833, 0.9159], so a Down contract can never be valued above 0.8167 and every Down favourite at 0.97-0.99 scored ev -0.17 and was blocked, while the identical Up trade at -0.075 passed. Measured live: 10 blocks, all Down. The guard's real job is a frozen book view (launch day: ours stuck at 0.99 while the venue traded 0.022), which a print comparison catches directly.",
+  "jumpscalp": {
+    "enabled": false,
+    "coins": [
+      "btc"
+    ],
+    "zmin": 0.15,
+    "mom_s": 10,
+    "size": 20,
+    "open_window_s": 5.0,
+    "min_price": 0.3,
+    "max_price": 0.7,
+    "target": 0.09,
+    "exit_s": 30.0,
+    "_note": "PRE-OPEN entry at t-20..t-10, exit +9c or flat 30s later, never at settlement. Direction from the sign of z with 10s momentum required to agree. HONEST out-of-sample btc, signals computed strictly as of the decision moment: +2.78c/sh t=4.9 at t-20, +2.64c t=5.4 at t-10, +2.65c t=5.6 at t0. An earlier measurement claimed +5.45c t=24.7 for the pre-open entry; it read spot and momentum AT t0 to decide at t-20, i.e. 20 seconds of look-ahead, and the 'earlier is much better' decay it produced was the leak's fingerprint. Corrected, pre-open and at-open are about equal and the edge is roughly half. Pre-open is kept because the book there is verifiably deep (643sh at the touch, 250sh at 0.00c slippage). NOT ESTABLISHED on eth/sol; btc only.",
+    "entry_lo": -12.0,
+    "entry_hi": -2.0,
+    "dir_mode": "both",
+    "_entry_note": "Entry t-12..t-2. The three candidate windows are statistically indistinguishable out-of-sample (t-20 +2.78c, t-10 +2.64c, t0 +2.65c) and book depth could not separate them either -- every window showed the same ~555sh at the touch and 0.00c slippage on 250 shares, on only 2 markets. So the tiebreaker is whether the bot can PRICE the market that early: the strike is the mean over [t0-30, t0) and needs >=3 oracle ticks, which at ~0.2-1.0 ticks/s is marginal at t-20 (10s elapsed) and safe by t-12 (18s). This window keeps the pre-open entry while giving the strike time to exist."
+  }
 }
