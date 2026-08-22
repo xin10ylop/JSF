@@ -709,8 +709,24 @@ class BotState:
         if m.k_fixed is not None:
             return m.k_fixed
         w_us = int(m.w * 1e6)
+        # Bound the integral at NOW, not at t0. This class was written on
+        # the assumption that "the strike window has already elapsed by the
+        # time the market is discovered", which holds for every endgame
+        # caller but not for a strategy deciding BEFORE the open. Asked to
+        # integrate to a future t0, _integral holds the last round across
+        # the un-elapsed remainder and charges that stretch to max_hole --
+        # so the hole equals the seconds still to run, and the
+        # hole > MAX_HOLE_S guard below refused every call more than 5s
+        # before the open. JumpScalp's window is t-12..t-2, so 7 of its 10
+        # seconds returned None with no error anywhere: the future was
+        # being diagnosed as a feed outage.
+        # Averaging only what has elapsed also matches the quantity the
+        # scalp study measured (the partial strike), rather than one with
+        # the last price held flat across the rest.
+        # After t0 this is exactly min(now, t0) == t0, so every endgame
+        # path is bit-for-bit unchanged.
         ps, secs, nticks, covered, hole = self._integral(
-            m.t0_us - w_us, m.t0_us)
+            m.t0_us - w_us, min(now_us(), m.t0_us))
         # The average is a TIME-WEIGHTED integral, so it does not need many
         # ticks -- it needs a price in force from the start of the window
         # (`covered`) plus enough updates that it is not one stale quote
