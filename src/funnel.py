@@ -91,6 +91,20 @@ def main():
               "Pre-open that used to mean the un-elapsed strike window.")
     mw = nonzero(h.get("miss_why"))
     print(f"SIGNAL -> ORDER MISSES  {mw or 'none'}")
+    # A signal sized to ZERO never reaches the dispatcher, so it lands in
+    # `rejects`, not in miss_why -- and rejects["size"] is precisely the
+    # concurrency/cap starvation case (max_concurrent markets already hold
+    # positions, so every new market sizes to nothing). Leaving it out
+    # made a fully starved bot look identical to an idle one.
+    print(f"PRE-DISPATCH REJECTS   {nonzero(h.get('rejects')) or 'none'}")
+    if (h.get("rejects") or {}).get("size"):
+        print("   size: sized to 0 -- per-market cap full, or "
+              "max_concurrent markets already hold positions")
+    print(f"OPEN STATE  pending_settle={h.get('pending_settle')}  "
+          f"pending_orders={h.get('pending_orders')}  "
+          f"inflight={h.get('inflight')}  "
+          f"venue_rejects={h.get('venue_rejects')}  "
+          f"partials={h.get('partials')}")
 
     # `too_small` is raised by two different code paths -- the live
     # dispatcher (size under the venue's 5-share orderMinSize) and the
