@@ -53,17 +53,29 @@ def load(coin):
     return out
 
 
-def zscore(r):
-    """Distance to the already-fixed strike, in sds of what is left."""
+def zscore(r, te=0.0):
+    """Distance to the strike, in sds of what is left, AS OF te.
+
+    te is seconds relative to t0 and must be the decision moment.
+    Defaulting it to 0 (open) is only correct for an at-open entry:
+    reading spot at t0 to decide at t-20 is look-ahead, and it inflated
+    the pre-open result from a true +2.78c/sh (t=4.9) to a fictional
+    +5.45c (t=24.7). The decay it produced -- 'earlier is much better'
+    -- was the leak's fingerprint, not an effect.
+    """
     p, t0 = r["path"], r["t0"]
-    k = [p[u] for u in range(-30, 0) if u in p]
-    if len(k) < 20:
+    k = [p[u] for u in range(-30, int(te)) if u in p]   # strike SO FAR
+    if len(k) < 5:
         return None
     K = sum(k) / len(k)
-    spot = p.get(0) or p.get(-1)
+    spot = None
+    for u in range(int(te), int(te) - 6, -1):
+        if u in p:
+            spot = p[u]
+            break
     if not spot:
         return None
-    xs = sorted(u for u in p if -130 <= u < 0)
+    xs = sorted(u for u in p if -130 <= u < te)
     rs = [math.log(p[b] / p[a]) for a, b in zip(xs, xs[1:])
           if b - a == 1 and p[a] > 0]
     if len(rs) < 60:
@@ -71,7 +83,8 @@ def zscore(r):
     sd = statistics.pstdev(rs)
     if sd <= 0:
         return None
-    return (spot - K) / (sd * spot * math.sqrt(270 + 10))
+    rem = 300 - 30 - te            # unrealised part of the window
+    return (spot - K) / (sd * spot * math.sqrt(max(rem, 1) + 10))
 
 
 def trades(recs, zmin=ZMIN, target=TARGET, exit_s=EXIT_S, mom_s=MOM_S,

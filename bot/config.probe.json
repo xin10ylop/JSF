@@ -105,7 +105,7 @@
   "max_price": 0.7,
   "target": 0.09,
   "exit_s": 30.0,
-  "_note": "PRE-OPEN entry. Buy at t-20..t-10 -- before the market re-prices -- and exit at +9c or flat 30s later, never at settlement. Direction is the SIGN OF Z (BTC above the level it must beat), with 10s momentum required to agree. Out-of-sample btc, parameters never fit on it: z-sign +5.29c/sh t=24.0, both-agree +5.38c t=22.2, 10s momentum alone only +3.87c. Entry timing out-of-sample: t-20..-10 +5.45c, t-10..0 +4.88c, t0..+5 +2.65c -- the edge is before the open and decays after it. Every dimension is a plateau not a spike (momentum 5/10/20/30s all +5.3-5.6; exit 15/30/45/60/90s all +5.3-5.4), which is what a real effect looks like. Pre-open book verified live: 643 shares resting at the touch, 250sh fillable with 0.00c slippage. NOT ESTABLISHED on eth/sol; btc only.",
+  "_note": "PRE-OPEN entry at t-20..t-10, exit +9c or flat 30s later, never at settlement. Direction from the sign of z with 10s momentum required to agree. HONEST out-of-sample btc, signals computed strictly as of the decision moment: +2.78c/sh t=4.9 at t-20, +2.64c t=5.4 at t-10, +2.65c t=5.6 at t0. An earlier measurement claimed +5.45c t=24.7 for the pre-open entry; it read spot and momentum AT t0 to decide at t-20, i.e. 20 seconds of look-ahead, and the 'earlier is much better' decay it produced was the leak's fingerprint. Corrected, pre-open and at-open are about equal and the edge is roughly half. Pre-open is kept because the book there is verifiably deep (643sh at the touch, 250sh at 0.00c slippage). NOT ESTABLISHED on eth/sol; btc only.",
   "entry_lo": -20.0,
   "entry_hi": -10.0,
   "dir_mode": "both"
