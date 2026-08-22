@@ -73,6 +73,87 @@ class LiveExecutor:
                        closed_only=bool(self._client.get_closed_only_mode()))
         return self._client
 
+    def submit_taker_sell(self, token_id, shares, min_price, slug=None,
+                          outcome=None):
+        """FAK SELL of `shares`, refusing anything below `min_price`.
+
+        The first exit this bot has ever had. Every strategy before the
+        jump-scalp bought and waited for settlement, so `submit_taker`
+        is buy-only and its conventions are the wrong way round here:
+
+          price   a BUY limit is a CEILING and must be rounded UP to
+                  stay marketable; a SELL limit is a FLOOR and must be
+                  rounded DOWN. Rounding a sell up puts it above the
+                  bid, where it does not cross -- the same
+                  dead-on-arrival bug the buy path had with round().
+          size    a BUY sends dollars (makerAmount = size x price), so
+                  its share step follows gcd(price_cents, 100). A SELL
+                  sends SHARES, so the amount that must land on two
+                  decimals is the share count itself.
+
+        Returns the same shape as submit_taker. avg_px is taking/making
+        for a sell -- dollars received per share given -- so it is
+        comparable to the buy side's price.
+        """
+        px = math.floor(float(min_price) * 100 + 1e-9) / 100.0
+        if px < 0.01:
+            self._emit("sell_skip_below_tick", slug=slug, outcome=outcome,
+                       min_price=round(float(min_price), 4))
+            return {"status": "killed", "filled": 0.0, "avg_px": None,
+                    "order_id": None,
+                    "detail": f"min_price {float(min_price):.4f} below tick"}
+        px = round(min(px, 0.99), 2)
+        sh = round(math.floor(float(shares) * 100 + 1e-9) / 100.0, 2)
+        req = {"slug": slug, "token_id": str(token_id)[:16] + "...",
+               "side": "SELL", "outcome": outcome, "shares": sh,
+               "amount_usd": round(sh * px, 2), "min_price": px}
+        if sh < 5.0:
+            self._emit("sell_skip_min_after_quantize", **req)
+            return {"status": "killed", "filled": 0.0, "avg_px": None,
+                    "order_id": None,
+                    "detail": "below venue min after size quantization"}
+        if self.shadow:
+            self._emit("shadow_sell", **req)
+            return {"status": "shadow", "filled": 0.0, "avg_px": None,
+                    "order_id": None, "detail": "not sent"}
+        try:
+            from dataclasses import replace
+            signed = self.client.create_limit_order(
+                token_id=str(token_id), side="SELL",
+                price=f"{px:.2f}", size=f"{sh:.2f}")
+            r = self.client.post_order(replace(signed, order_type="FAK"))
+        except Exception as e:  # noqa: BLE001
+            msg = repr(e)
+            low = msg.lower()
+            if ("InsufficientLiquidity" in msg
+                    or "no orders found to match" in msg
+                    or "no match is found" in msg):
+                self._emit("sell_killed_no_liquidity", err=msg[:200], **req)
+                return {"status": "killed", "filled": 0.0, "avg_px": None,
+                        "order_id": None,
+                        "detail": "no bid at limit (FAK kill)"}
+            if "order match delayed" in low or "order timed out" in low:
+                self._emit("sell_pending", err=msg[:200], **req)
+                return {"status": "pending", "filled": 0.0, "avg_px": None,
+                        "order_id": None, "detail": msg[:200]}
+            self._emit("sell_error", err=msg[:300], **req)
+            return {"status": "error", "filled": 0.0, "avg_px": None,
+                    "order_id": None, "detail": msg[:300]}
+        making = float(getattr(r, "making_amount", 0) or 0)   # shares out
+        taking = float(getattr(r, "taking_amount", 0) or 0)   # dollars in
+        oid = getattr(r, "order_id", None)
+        status = str(getattr(r, "status", "") or "")
+        filled = making
+        avg_px = round(taking / making, 6) if making > 0 else None
+        self._emit("sell_result", order_id=oid, status=status,
+                   making=making, taking=taking, avg_px=avg_px, **req)
+        if filled <= 0:
+            return {"status": "killed", "filled": 0.0, "avg_px": None,
+                    "order_id": oid, "detail": f"no fill (status {status})"}
+        return {"status": "filled" if filled >= sh - 1e-9 else "partial",
+                "filled": filled, "avg_px": avg_px, "order_id": oid,
+                "detail": status}
+
     def submit_taker(self, token_id, side, shares, max_price, slug=None,
                      outcome=None):
         """FAK buy of `shares` of `token_id` capped at `max_price`.
