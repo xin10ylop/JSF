@@ -34,6 +34,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 GAMMA = "https://gamma-api.polymarket.com/markets"
 WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 TAIL_S = 90.0            # record this much of each market's endgame
+PHASE = "endgame"        # or "open": the jump-scalp needs the FIRST 90s,
+                         # where entry (buy near 0.50) and exit (sell +9c
+                         # or cross out at t+30) both have to find real
+                         # resting size. The endgame probe already caught
+                         # one wrong capacity claim; this closes the same
+                         # gap for the open.
 SAMPLE_S = 0.25          # our order lands ~400ms out and the venue's
                          # taker hold is 250ms: sampling once a second
                          # asks a question 600ms staler than reality,
@@ -103,7 +109,9 @@ async def run(minutes, out_path):
         books = {}
         bids = {}
         recon = [0, 0]     # [checks, best-ask mismatches]
-        t_stop = min(max(m["t1"] for m in mkts) + 5, deadline)
+        t_stop = min((max(m["t0"] for m in mkts) + TAIL_S + 5)
+                     if PHASE == "open"
+                     else max(m["t1"] for m in mkts) + 5, deadline)
         next_sample = time.time()
         try:
             async with websockets.connect(WS, ping_interval=20) as ws:
@@ -174,10 +182,15 @@ async def run(minutes, out_path):
                     next_sample = now + SAMPLE_S
                     for m in mkts:
                         rem = m["t1"] - now
-                        if not (0 < rem <= TAIL_S):
+                        since = now - m["t0"]
+                        if PHASE == "open":
+                            if not (0 <= since <= TAIL_S):
+                                continue
+                        elif not (0 < rem <= TAIL_S):
                             continue
                         row = {"slug": m["slug"], "t": round(now, 2),
-                               "rem": round(rem, 2)}
+                               "rem": round(rem, 2),
+                               "since_open": round(since, 2)}
                         for side, tok in (("Up", m["up"]),
                                           ("Down", m["dn"])):
                             bk = books.get(tok) or {}
@@ -213,7 +226,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--minutes", type=float, default=240)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--phase", default="endgame",
+                    choices=["endgame", "open"])
     a = ap.parse_args()
+    global PHASE
+    PHASE = a.phase
     asyncio.run(run(a.minutes, a.out))
 
 

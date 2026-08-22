@@ -12,3 +12,5 @@ bot/config.local.json
 # a run needs to survive a container revert; between those it must not
 # leave the tree permanently dirty.
 data/bookprobe/books.jsonl
+
+data/openbook/open.jsonl
