@@ -63,7 +63,9 @@ def main():
     orders = os.path.join(a.dir, "orders.jsonl")
 
     recs = tail_records(dec, {"health", "live_miss", "taker_miss",
-                              "scalp_exit", "scalp_exit_failed"})
+                              "scalp_exit", "scalp_exit_failed",
+                              "live_balance", "redeem_err",
+                              "redeem_list_err", "cash_kill"})
     heals = [r for r in recs if r.get("kind") == "health"]
     h = heals[-1] if heals else None
     if h is None:
@@ -105,6 +107,32 @@ def main():
           f"inflight={h.get('inflight')}  "
           f"venue_rejects={h.get('venue_rejects')}  "
           f"partials={h.get('partials')}")
+
+    # Winnings arrive as conditional tokens and are only cash once
+    # redeemed, so the wallet's USDC can sit flat while the portfolio
+    # grows -- that gap already produced one wrong "the balance is
+    # draining" read. `redeemed: 0` with no error is ambiguous between
+    # "nothing was redeemable" and "the listing call returned nothing it
+    # should have", so show the errors alongside it rather than either
+    # counter alone.
+    bals = [r for r in recs if r.get("kind") == "live_balance"]
+    if bals:
+        first, last = bals[0], bals[-1]
+        tot_red = sum(r.get("redeemed", 0) or 0 for r in bals)
+        print(f"\nWALLET  usdc={last.get('usdc')}  "
+              f"(from {first.get('usdc')} over {len(bals)} ops passes)  "
+              f"redeemed_total={tot_red}")
+        rerr = [r for r in recs
+                if r.get("kind") in ("redeem_err", "redeem_list_err")]
+        if rerr:
+            print(f"  REDEEM ERRORS n={len(rerr)}: "
+                  f"{(rerr[-1].get('err') or '')[:110]}")
+        elif tot_red == 0:
+            print("  no redeem errors and nothing redeemed -- the venue "
+                  "reported no redeemable positions")
+    for r in recs:
+        if r.get("kind") == "cash_kill":
+            print(f"  CASH KILL: bal={r.get('bal')} floor={r.get('floor')}")
 
     # `too_small` is raised by two different code paths -- the live
     # dispatcher (size under the venue's 5-share orderMinSize) and the
