@@ -553,11 +553,19 @@ class JumpScalp:
         self.zmin = cfg.get("zmin", 0.15)
         self.mom_s = cfg.get("mom_s", 10)
         self.size = cfg.get("size", 8)
-        self.open_window_s = cfg.get("open_window_s", 5.0)
+        # PRE-open by default. Measured out-of-sample on btc, entry by
+        # window: t-20..-10 +5.45c/sh (t=24.7), t-10..0 +4.88c,
+        # t0..+5 +2.65c. The edge is largest before the market
+        # re-prices and collapses once it has; buying after the open --
+        # the first version of this class -- gave away more than half.
+        self.entry_lo = cfg.get("entry_lo", -20.0)
+        self.entry_hi = cfg.get("entry_hi", -10.0)
+        self.open_window_s = cfg.get("open_window_s", 5.0)   # legacy
         self.min_price = cfg.get("min_price", 0.30)
         self.max_price = cfg.get("max_price", 0.70)
         self.target = cfg.get("target", 0.09)
         self.exit_s = cfg.get("exit_s", 30.0)
+        self.dir_mode = cfg.get("dir_mode", "both")
         self.fired = set()
         self.f = {"eval": 0, "in_window": 0, "priced": 0, "z_pass": 0,
                   "mom": 0, "book": 0, "px_pass": 0, "fired": 0}
@@ -567,7 +575,7 @@ class JumpScalp:
         if m.t1_us - m.t0_us != 300_000_000:
             return None                       # 5m only
         since = (t_us - m.t0_us) / 1e6
-        if not (0 <= since <= self.open_window_s):
+        if not (self.entry_lo <= since <= self.entry_hi):
             return None
         self.f["in_window"] += 1
         if m.slug in self.fired:
@@ -587,10 +595,25 @@ class JumpScalp:
             if now_s - ts >= self.mom_s:
                 back = px
                 break
-        if spot is None or back is None or spot == back:
+        if spot is None or back is None:
             return None
+        mom = spot - back
+        # Direction from the SIGN OF Z -- BTC above the level it must
+        # beat. Measured out-of-sample: z-sign +5.29c/sh (t=24.0) vs
+        # 10s momentum +3.87c (t=9.9); requiring both to agree gives
+        # +5.38c (t=22.2) on ~20% fewer trades. Momentum alone was the
+        # first version's rule and was the weakest of the three.
+        if self.dir_mode == "mom":
+            if mom == 0:
+                return None
+            side = "Up" if mom > 0 else "Down"
+        elif self.dir_mode == "z":
+            side = "Up" if z > 0 else "Down"
+        else:                                   # both must agree
+            if mom == 0 or (mom > 0) != (z > 0):
+                return None
+            side = "Up" if z > 0 else "Down"
         self.f["mom"] += 1
-        side = "Up" if spot > back else "Down"
         if side == "Up":
             ask, _sz = m.best_ask()
         else:
@@ -606,7 +629,7 @@ class JumpScalp:
         return {"action": "taker_buy", "side": side, "px": ask,
                 "size": self.size, "one_shot": True,
                 "scalp": {"target": round(ask + self.target, 4),
-                          "deadline_us": int(m.t0_us
+                          "deadline_us": int(t_us
                                              + self.exit_s * 1e6)},
                 "z": round(z, 3), "mom": round(spot - back, 2),
                 "oracle_age_s": state.oracle_age_s(),

@@ -104,6 +104,9 @@
   "max_price": 0.7,
   "target": 0.09,
   "exit_s": 30.0,
-  "_note": "Trade the opening jump, never the outcome: buy near 0.50 in the first seconds, leave inside 30s at +9c or flat. Out-of-sample btc (5 days the parameters never saw): taker exit +2.07c/sh t=4.37, maker +2.82c/sh t=5.75, 6/6 days positive, survives dropping the 20 best trades, bootstrap P(EV<=0)=0.0000. In-sample was WEAKER (+1.00c taker), so the rule did not degrade out of sample. Exits are marketable FAK limits, never resting orders -- the +2.07c figure assumes no queue position, and a rested sell is what made ZMaker lose 22.8c/sh. NOT ESTABLISHED: eth (+0.71c) and sol (-0.06c) show nothing out-of-sample; btc only until that is understood. Scaling: entry depth p10 is 54sh so past ~250sh the book gets walked and ~1c of slippage takes half a 2c edge -- confident zone is 50-100sh."
+  "_note": "PRE-OPEN entry. Buy at t-20..t-10 -- before the market re-prices -- and exit at +9c or flat 30s later, never at settlement. Direction is the SIGN OF Z (BTC above the level it must beat), with 10s momentum required to agree. Out-of-sample btc, parameters never fit on it: z-sign +5.29c/sh t=24.0, both-agree +5.38c t=22.2, 10s momentum alone only +3.87c. Entry timing out-of-sample: t-20..-10 +5.45c, t-10..0 +4.88c, t0..+5 +2.65c -- the edge is before the open and decays after it. Every dimension is a plateau not a spike (momentum 5/10/20/30s all +5.3-5.6; exit 15/30/45/60/90s all +5.3-5.4), which is what a real effect looks like. Pre-open book verified live: 643 shares resting at the touch, 250sh fillable with 0.00c slippage. NOT ESTABLISHED on eth/sol; btc only.",
+  "entry_lo": -20.0,
+  "entry_hi": -10.0,
+  "dir_mode": "both"
  }
 }

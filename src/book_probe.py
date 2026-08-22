@@ -40,6 +40,7 @@ PHASE = "endgame"        # or "open": the jump-scalp needs the FIRST 90s,
                          # resting size. The endgame probe already caught
                          # one wrong capacity claim; this closes the same
                          # gap for the open.
+PRE_S = 45.0             # seconds BEFORE open to start capturing
 SAMPLE_S = 0.25          # our order lands ~400ms out and the venue's
                          # taker hold is 250ms: sampling once a second
                          # asks a question 600ms staler than reality,
@@ -57,7 +58,7 @@ def discover(coin="btc", fam="5m"):
     step = 300
     now = int(time.time())
     out = []
-    for k in (0, 1):
+    for k in (0, 1, 2):
         t0 = (now // step) * step + k * step
         try:
             arr = http_get(f"{GAMMA}?slug={coin}-updown-{fam}-{t0}")
@@ -184,7 +185,12 @@ async def run(minutes, out_path):
                         rem = m["t1"] - now
                         since = now - m["t0"]
                         if PHASE == "open":
-                            if not (0 <= since <= TAIL_S):
+                            # start BEFORE t0: the edge lives at
+                            # t-20..t-10, and an entry-fill claim there
+                            # needs the pre-open book, not the post-open
+                            # one. Prints prove someone traded, not that
+                            # depth existed for us.
+                            if not (-PRE_S <= since <= TAIL_S):
                                 continue
                         elif not (0 < rem <= TAIL_S):
                             continue
