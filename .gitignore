@@ -6,3 +6,9 @@ __pycache__/
 .ipynb_checkpoints/
 scratch/
 bot/config.local.json
+
+# Live book capture: an append-only measurement file that a running probe
+# writes to continuously. Checkpoints are committed with `git add -f` when
+# a run needs to survive a container revert; between those it must not
+# leave the tree permanently dirty.
+data/bookprobe/books.jsonl
