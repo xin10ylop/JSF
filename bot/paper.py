@@ -122,6 +122,42 @@ class PaperBroker:
                        if o["remaining"] > 0 and t_us <= o["expire_us"]]
 
     # ---- settlement ----------------------------------------------------
+    def taker_sell(self, slug, side_label, px, shares, meta=None):
+        """Close part or all of a position at `px`, booking realised P&L.
+
+        Without this the jump-scalp's exits were invisible: the exit loop
+        called it behind a hasattr guard, the guard failed, and the sale
+        was a silent no-op. The position stayed open in the book, so
+        settle() later scored shares that had already been sold --
+        phantom P&L into day_pnl, which is the number the daily stop
+        reads. A scalp that sells at 0.59 for +9c would have been booked
+        as a full loss at settlement.
+
+        Cost basis is reduced proportionally, so a partial exit leaves
+        the remainder carrying its share of the original cost. Returns
+        realised P&L in dollars.
+        """
+        key = (slug, side_label)
+        pos = self.positions.get(key)
+        if pos is None or shares <= 0 or px is None:
+            return 0.0
+        sh = min(float(shares), pos["shares"])
+        if sh <= 0:
+            return 0.0
+        frac = sh / pos["shares"] if pos["shares"] > 0 else 1.0
+        basis = pos["cost"] * frac
+        fee = 0.07 * px * (1 - px)
+        proceeds = sh * (px - fee)
+        pos["shares"] -= sh
+        pos["cost"] -= basis
+        if pos["shares"] <= 1e-9:
+            del self.positions[key]
+        self._emit("taker_sell", slug=slug, side=side_label, px=px,
+                   shares=sh, fee_per_sh=fee, basis=round(basis, 4),
+                   proceeds=round(proceeds, 4),
+                   pnl=round(proceeds - basis, 4), meta=meta or {})
+        return proceeds - basis
+
     def settle(self, slug, result):
         """result: 0 = Up won, 1 = Down won."""
         pnl = 0.0

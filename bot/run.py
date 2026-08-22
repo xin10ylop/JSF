@@ -1883,13 +1883,19 @@ class Bot:
                 if st in ("filled", "partial"):
                     got = float(r.get("filled") or 0.0)
                     px = r.get("avg_px") or floor
-                    self.broker.taker_sell(p["slug"], p["side"], px, got) \
-                        if hasattr(self.broker, "taker_sell") else None
+                    # No hasattr guard: a missing broker method must
+                    # crash loudly, not silently skip the booking. It
+                    # did skip, and settle() then scored shares already
+                    # sold -- phantom P&L straight into day_pnl, which
+                    # is what the daily stop reads.
+                    real = self.broker.taker_sell(p["slug"], p["side"],
+                                                  px, got)
                     self.log_decision({
                         "kind": "scalp_exit", "slug": p["slug"],
                         "side": p["side"], "entry": round(p["entry"], 4),
                         "exit": px, "shares": got,
                         "pnl_c": round(100 * (px - p["entry"]), 2),
+                        "realised": round(real, 4),
                         "why": "target" if hit else "deadline"})
                     p["shares"] -= got
                     if p["shares"] < 5.0:
