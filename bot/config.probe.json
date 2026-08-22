@@ -106,8 +106,9 @@
   "target": 0.09,
   "exit_s": 30.0,
   "_note": "PRE-OPEN entry at t-20..t-10, exit +9c or flat 30s later, never at settlement. Direction from the sign of z with 10s momentum required to agree. HONEST out-of-sample btc, signals computed strictly as of the decision moment: +2.78c/sh t=4.9 at t-20, +2.64c t=5.4 at t-10, +2.65c t=5.6 at t0. An earlier measurement claimed +5.45c t=24.7 for the pre-open entry; it read spot and momentum AT t0 to decide at t-20, i.e. 20 seconds of look-ahead, and the 'earlier is much better' decay it produced was the leak's fingerprint. Corrected, pre-open and at-open are about equal and the edge is roughly half. Pre-open is kept because the book there is verifiably deep (643sh at the touch, 250sh at 0.00c slippage). NOT ESTABLISHED on eth/sol; btc only.",
-  "entry_lo": -20.0,
-  "entry_hi": -10.0,
-  "dir_mode": "both"
+  "entry_lo": -12.0,
+  "entry_hi": -2.0,
+  "dir_mode": "both",
+  "_entry_note": "Entry t-12..t-2. The three candidate windows are statistically indistinguishable out-of-sample (t-20 +2.78c, t-10 +2.64c, t0 +2.65c) and book depth could not separate them either -- every window showed the same ~555sh at the touch and 0.00c slippage on 250 shares, on only 2 markets. So the tiebreaker is whether the bot can PRICE the market that early: the strike is the mean over [t0-30, t0) and needs >=3 oracle ticks, which at ~0.2-1.0 ticks/s is marginal at t-20 (10s elapsed) and safe by t-12 (18s). This window keeps the pre-open entry while giving the strike time to exist."
  }
 }
