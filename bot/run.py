@@ -1910,6 +1910,10 @@ class Bot:
                             "kind": "scalp_rested", "slug": p["slug"],
                             "side": p["side"], "shares": p["shares"],
                             "target": round(p["target"], 4),
+                            # how long the CTF balance took to settle,
+                            # in 0.5s ticks -- the number that decides
+                            # whether 20 retries is the right budget
+                            "tries": p.get("rest_tries", 0) + 1,
                             "order_id": r.get("order_id")})
                     elif st in ("filled", "partial"):
                         # crossed on arrival: the bid was already above
@@ -1928,13 +1932,33 @@ class Bot:
                         if p["shares"] < 5.0:
                             self._scalps.pop(k, None)
                     else:
-                        # could not rest -- fall back to the taker path
-                        # rather than carry the binary to settlement
-                        p["no_rest"] = True
-                        self.log_decision({
-                            "kind": "scalp_rest_failed", "slug": p["slug"],
-                            "side": p["side"], "status": st,
-                            "detail": (r.get("detail") or "")[:120]})
+                        det = (r.get("detail") or "").lower()
+                        # The shares are NOT in the wallet the instant the
+                        # buy fills. The venue matches, then the CTF
+                        # balance settles a moment later, so a sell posted
+                        # 0.5s after the fill is refused with
+                        # "not enough balance / allowance ... balance: 0".
+                        # Observed on all three of the first live scalps.
+                        # That is a timing condition, not a permanent one,
+                        # so retry instead of disabling the resting exit
+                        # for the life of the position -- giving up cost
+                        # the whole maker advantage (+1.05c/share, since a
+                        # lifted resting sell pays no exit fee where the
+                        # taker pays ~1.4c).
+                        transient = ("not enough balance" in det
+                                     or "allowance" in det)
+                        p["rest_tries"] = p.get("rest_tries", 0) + 1
+                        giving_up = not transient or p["rest_tries"] > 20
+                        if giving_up:
+                            p["no_rest"] = True
+                        if p["rest_tries"] == 1 or giving_up:
+                            self.log_decision({
+                                "kind": "scalp_rest_failed",
+                                "slug": p["slug"], "side": p["side"],
+                                "status": st, "tries": p["rest_tries"],
+                                "transient": transient,
+                                "gave_up": giving_up,
+                                "detail": (r.get("detail") or "")[:120]})
                     continue
 
                 # --- stage 2: has the resting sell been lifted? -------

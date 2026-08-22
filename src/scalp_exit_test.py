@@ -135,3 +135,49 @@ async def main():
     print("\nPASS: rests, books maker fills fee-free, never double-sells")
 
 asyncio.run(main())
+
+
+# ---- 5/6: a balance rejection is TRANSIENT, not permanent ------------
+class FlakyExec(FakeExec):
+    """Refuses the resting sell until the CTF balance settles."""
+    def __init__(self, fail_n):
+        super().__init__(lift_after=0.0)
+        self.fail_n, self.attempts = fail_n, 0
+    def submit_maker_sell(self, token, shares, price, slug=None, outcome=None):
+        self.attempts += 1
+        if self.attempts <= self.fail_n:
+            self.calls.append(("rest_refused", self.attempts))
+            return {"status": "error", "filled": 0.0, "avg_px": None,
+                    "order_id": None,
+                    "detail": "RequestRejectedError('not enough balance / "
+                              "allowance: the balance is not enough -> "
+                              "balance: 0, order amount: 18750000')"}
+        return super().submit_maker_sell(token, shares, price,
+                                         slug=slug, outcome=outcome)
+
+
+async def extra():
+    # settles after 3 refusals -> must still end up resting
+    ex = FlakyExec(fail_n=3)
+    b = make_bot(ex, 60_000_000)
+    await tick(b, 8)
+    assert ex.resting == "OID1", f"never rested: {ex.calls}"
+    rested = [d for d in b._decisions if d["kind"] == "scalp_rested"]
+    assert rested, [d["kind"] for d in b._decisions]
+    print(f"5. balance settles late  rested after {rested[0]['tries']} "
+          f"tries (refused {ex.attempts - 1}x)")
+
+    # a NON-transient refusal gives up at once and uses the taker
+    ex2 = FakeExec()
+    ex2.submit_maker_sell = lambda *a, **k: (
+        ex2.calls.append(("rest_refused", "hard")),
+        {"status": "rejected", "filled": 0.0, "avg_px": None,
+         "order_id": None, "detail": "market is closed"})[1]
+    b2 = make_bot(ex2, 1_000_000)
+    await tick(b2, 4)
+    assert sum(1 for c in ex2.calls if c[0] == "rest_refused") == 1, ex2.calls
+    assert any(c[0] == "taker" for c in ex2.calls), ex2.calls
+    print("6. hard refusal          gave up once, fell back to taker")
+    print("\nPASS: transient balance refusals retry; hard ones fall back")
+
+asyncio.run(extra())

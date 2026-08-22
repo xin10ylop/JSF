@@ -90,14 +90,14 @@ def trades(recs, te, zmin=ZMIN, target=TARGET, exit_s=EXIT_S,
         # The difference is the whole ZMaker lesson (-22.8c/share on
         # assumed queue position), so it is measured, not assumed.
         strict = exit_style == "maker_strict"
-        hit, last = False, None
+        hit, last, hit_px = False, None, None
         for ts, up, _sz, _sd in r["prints"]:
             if not (entry_ts < ts <= entry_ts + exit_s):
                 continue
             q = up if side_up else 1 - up
             last = q
             if (q > tgt + 1e-9) if strict else (q >= tgt):
-                hit = True
+                hit, hit_px = True, q
                 break
         if last is None:
             continue
@@ -106,6 +106,15 @@ def trades(recs, te, zmin=ZMIN, target=TARGET, exit_s=EXIT_S,
         # A miss still has to cross out at the horizon.
         if exit_style in ("maker", "maker_strict") and hit:
             pnl = tgt - entry - FEE(entry)
+        elif exit_style == "taker_ride":
+            # What the live bot ACTUALLY does: poll the book, and the
+            # moment the bid is at or above the target, cross. It fills
+            # at the BID, which can be well past the target -- observed
+            # live at 0.74/0.67/0.69 against 9c targets. Capping the
+            # taker at tgt (as the other styles do) understates it and
+            # made the resting sell look strictly better than it is.
+            px = hit_px if hit else last
+            pnl = (px - TICK) - entry - FEE(entry) - FEE(px)
         else:
             pnl = ((tgt if hit else last) - TICK) - entry - FEE(entry)
         out.append({"t0": t0, "z": z, "entry": entry, "hit": hit,
