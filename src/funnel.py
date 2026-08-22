@@ -173,6 +173,23 @@ def main():
         if k not in ("client_ready",):
             recent.append(d)
     print(f"\nORDER OUTCOMES  {kinds}")
+    # Surface WHY a resting sell was refused. The maker exit is worth
+    # +0.40c/share over crossing out, and it fails silently into the
+    # taker fallback, so the reason has to be visible here or the
+    # degradation never gets noticed.
+    merr = [d for d in recent if d.get("kind") in
+            ("maker_sell_error", "maker_sell_rejected", "maker_sell_skip_min",
+             "maker_sell_skip_tick", "cancel_err", "order_state_err")]
+    if merr:
+        print(f"  RESTING-SELL FAILURES n={len(merr)}")
+        seen = set()
+        for d in merr[-4:]:
+            msg = (d.get("err") or d.get("message") or d.get("detail") or "")
+            key = (d.get("kind"), msg[:60])
+            if key in seen:
+                continue
+            seen.add(key)
+            print(f"    {d.get('kind')}: {msg[:150]}")
     for d in recent[-a.orders:]:
         t = time.strftime("%H:%M:%S", time.localtime(d.get("t_us", 0) / 1e6))
         err = (d.get("err") or "")[:58]
@@ -189,8 +206,12 @@ def main():
         print(f"\nSCALP EXITS  ok={len(done)}  failed={len(fail)}  "
               f"realised=${tot:+.2f}")
         for e in done[-5:]:
-            print(f"  why={e.get('why')} px={e.get('px')} "
-                  f"realised={e.get('realised')}")
+            # the log key is `exit`, not `px`
+            print(f"  why={e.get('why'):<18} exit={e.get('exit')} "
+                  f"sh={e.get('shares')} realised={e.get('realised')}")
+        if not any(e.get("why", "").startswith("target_maker") for e in done):
+            print("  NOTE: no maker exits -- the resting sell is not "
+                  "working; these are taker fallbacks")
 
 
 if __name__ == "__main__":
