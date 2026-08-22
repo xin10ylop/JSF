@@ -146,6 +146,27 @@ class Risk:
         if self.day_pnl < -abs(self.daily_loss_limit):
             self.killed = True
 
+    def reconcile_day_pnl(self, day_pnl):
+        """Overwrite today's P&L with the venue's own figure.
+
+        day_pnl is an accumulator fed by settle events, so it only knows
+        about markets that resolved while this process was alive. A
+        restart across a settlement loses that P&L permanently -- live
+        it read +0.28 against a real -12.15 after a session of restarts,
+        with a -12.70 loss missing entirely. Since day_pnl is what the
+        daily loss limit reads, drift in it disables the stop.
+
+        bot/ledger.py recomputes the day from Polymarket's cash record,
+        which restarts cannot erase; this makes that authoritative and
+        re-evaluates the kill. Returns the drift it corrected.
+        """
+        self._roll_day()
+        drift = day_pnl - self.day_pnl
+        self.day_pnl = day_pnl
+        if self.day_pnl < -abs(self.daily_loss_limit):
+            self.killed = True
+        return drift
+
     def seed(self, day_pnl, outcomes, logged=None):
         """Restart persistence: today's realized P&L and settle outcomes
         (won bools, oldest first) rebuilt from the decision log, plus the

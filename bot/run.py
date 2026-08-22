@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.state import BotState, MarketState, now_us  # noqa: E402
 from bot.paper import PaperBroker  # noqa: E402
 from bot.risk import Risk  # noqa: E402
+from bot import ledger  # noqa: E402
 from bot.strategy import (GzValueMaker, ExtremeTaker, VacuumLadder,  # noqa: E402
                           RollAvgEdge, ZMaker, EarlyBird,
                           JumpScalp)
@@ -2126,10 +2127,45 @@ class Bot:
                     None, self._live_ops_pass)
                 self.log_decision({"kind": "live_balance", "usdc": bal,
                                    "redeemed": redeemed})
+                await loop.run_in_executor(None, self._reconcile_day_pnl)
             except Exception as e:  # noqa: BLE001
                 self.log_decision({"kind": "live_ops_err",
                                    "err": repr(e)[:200]})
             await asyncio.sleep(300)
+
+    def _reconcile_day_pnl(self):
+        """Re-anchor the daily stop on the venue's cash record.
+
+        day_pnl only counts markets that settled while THIS process was
+        alive: _replay_positions skips already-settled markets on
+        startup (they cannot settle twice) and _seed_day_pnl rebuilds
+        the day from our own "settled" lines, which were never written
+        for anything that resolved while the bot was down. After a
+        session of restarts it read +0.28 against a real -12.15, with a
+        -12.70 loss absent entirely -- and day_pnl is what the daily
+        loss limit reads, so the stop was blind by the full drift.
+
+        A failed read returns None and is left alone: treating an
+        unreachable feed as a flat day is the same mistake in a
+        different costume.
+        """
+        wallet = os.environ.get("POLYMARKET_FUNDER")
+        if not wallet:
+            return
+        got = ledger.realised_since(wallet, ledger.utc_day_start())
+        if got is None:
+            self.log_decision({"kind": "day_pnl_reconcile_failed",
+                               "note": "venue ledger unreadable; keeping "
+                                       "the in-memory accumulator"})
+            return
+        net, n, n_open = got
+        drift = self.risk.reconcile_day_pnl(net)
+        if abs(drift) >= 0.01:
+            self.log_decision({"kind": "day_pnl_reconciled",
+                               "venue": round(net, 2),
+                               "drift": round(drift, 2),
+                               "markets": n, "open": n_open,
+                               "killed": self.risk.killed})
 
     def _ops_client(self):
         """Housekeeping/verification client on its OWN HTTP connection:
