@@ -66,6 +66,35 @@ def load_cfg(path=None):
     return cfg
 
 
+# Signal keys that describe HOW to trade rather than WHY. Everything a
+# strategy emits outside this set is forwarded to the order's meta.
+_SIG_CONTROL = frozenset((
+    "action", "side", "size", "px", "limit_px", "one_shot", "levels",
+    "level", "fair",
+))
+
+
+def sig_meta(sig, **extra):
+    """Order meta from a signal: forward everything non-control.
+
+    This used to be a hand-written key list per dispatch path, which
+    silently dropped any field the list did not name. JumpScalp emits
+    `scalp` (its exit target and deadline) and the fill handler reads
+    meta["scalp"] to register the position with the exit loop -- but
+    neither list named it, so _scalps stayed empty, nothing ever sold,
+    and three live entries were carried to settlement and lost. The
+    strategy's whole risk claim is that it never holds to expiry, and a
+    dropped dict key silently made that claim false.
+
+    Forwarding by default means the next strategy field cannot be lost
+    the same way; anything genuinely execution-only goes in
+    _SIG_CONTROL.
+    """
+    m = {k: v for k, v in sig.items() if k not in _SIG_CONTROL}
+    m.update(extra)
+    return m
+
+
 class Bot:
     def __init__(self, cfg, coin=None):
         self.cfg = cfg
@@ -1347,11 +1376,7 @@ class Bot:
                     "slug": m.slug, "side": sig["side"],
                     "limit": sig.get("limit_px", sig["px"]), "size": size,
                     "fire_us": now_us() + self.latency_us,
-                    "meta": {"reason": sig["reason"],
-                             "oracle_age_s": sig.get("oracle_age_s"),
-                             "z": sig.get("z"),
-                             "ev_est": sig.get("ev_est"),
-                             "seen_px": sig["px"]}})
+                    "meta": sig_meta(sig, seen_px=sig["px"])})
                 if self.mode == "shadow" and self.executor is not None:
                     # The execution-shadow record: exactly the order live
                     # mode would send, logged next to the paper fill the
@@ -1464,10 +1489,8 @@ class Bot:
                                                      sig.get("fair"))
         o = {"slug": m.slug, "side": sig["side"], "limit": lim,
              "size": float(size),
-             "meta": {"reason": sig["reason"], "z": sig.get("z"),
-                      "pad_c": round(100 * (lim - sig["px"]), 1),
-                      "oracle_age_s": sig.get("oracle_age_s"),
-                      "ev_est": sig.get("ev_est"), "seen_px": sig["px"]}}
+             "meta": sig_meta(sig, seen_px=sig["px"],
+                              pad_c=round(100 * (lim - sig["px"]), 1))}
         self.inflight.append(o)
         self.n_sent += 1
         asyncio.get_running_loop().create_task(self._live_roundtrip(o, tok))
