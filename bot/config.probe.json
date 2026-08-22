@@ -93,7 +93,7 @@
   "desync_gap": 0.15,
   "_desync_note": "Blocks a signal whose price disagrees with the venue's OWN last print by more than this. Replaces a model-disagreement check that silently halved the strategy: calib.py's p_up spans [0.1833, 0.9159], so a Down contract can never be valued above 0.8167 and every Down favourite at 0.97-0.99 scored ev -0.17 and was blocked, while the identical Up trade at -0.075 passed. Measured live: 10 blocks, all Down. The guard's real job is a frozen book view (launch day: ours stuck at 0.99 while the venue traded 0.022), which a print comparison catches directly.",
   "jumpscalp": {
-    "enabled": true,
+    "enabled": false,
     "coins": [
       "btc"
     ],
@@ -109,6 +109,7 @@
     "entry_lo": 0,
     "entry_hi": 3,
     "dir_mode": "both",
-    "_entry_note": "AT the open, t+0..t+3. The pre-open window was chosen on a look-ahead artifact; scored at the decision instant it is +0.00 to +0.66 c/sh (t~1) while t+0..t+3 is +1.21 to +2.19 (t 2.2-4.3) and t+4 falls to +0.24. See src/jumpscalp_preopen.py."
+    "_entry_note": "AT the open, t+0..t+3. The pre-open window was chosen on a look-ahead artifact; scored at the decision instant it is +0.00 to +0.66 c/sh (t~1) while t+0..t+3 is +1.21 to +2.19 (t 2.2-4.3) and t+4 falls to +0.24. See src/jumpscalp_preopen.py.",
+    "_off_note": "OFF 2026-08-22 at the account owner's instruction after 4 live trades (+2.72 on three winners, -5.11 on one deadline exit, net -2.39). The entry and exit chain is working end to end; this is a decision about variance, not a defect. Re-enable by flipping the flag -- strategy code, tests and measurements are all left in place."
   }
 }
