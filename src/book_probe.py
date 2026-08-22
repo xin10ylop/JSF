@@ -101,6 +101,7 @@ async def run(minutes, out_path):
             tok2mkt[m["up"]] = (m, "Up")
             tok2mkt[m["dn"]] = (m, "Down")
         books = {}
+        bids = {}
         recon = [0, 0]     # [checks, best-ask mismatches]
         t_stop = min(max(m["t1"] for m in mkts) + 5, deadline)
         next_sample = time.time()
@@ -127,6 +128,9 @@ async def run(minutes, out_path):
                                     truth = {
                                         float(x["price"]): float(x["size"])
                                         for x in (ev.get("asks") or [])}
+                                    bids[tok] = {
+                                        float(x["price"]): float(x["size"])
+                                        for x in (ev.get("bids") or [])}
                                     # A reconstructed book that silently
                                     # drifts from the venue's would make
                                     # every fill number fiction. Each full
@@ -146,10 +150,13 @@ async def run(minutes, out_path):
                                             recon[1] += 1
                                     books[tok] = truth
                                 elif et == "price_change":
-                                    cur = books.setdefault(tok, {})
                                     for ch in ev.get("changes") or []:
-                                        if str(ch.get("side", "")).upper() \
-                                                not in ("SELL", "ASK"):
+                                        sd_ = str(ch.get("side", "")).upper()
+                                        if sd_ in ("SELL", "ASK"):
+                                            cur = books.setdefault(tok, {})
+                                        elif sd_ in ("BUY", "BID"):
+                                            cur = bids.setdefault(tok, {})
+                                        else:
                                             continue
                                         p = float(ch["price"])
                                         s = float(ch["size"])
@@ -174,8 +181,19 @@ async def run(minutes, out_path):
                         for side, tok in (("Up", m["up"]),
                                           ("Down", m["dn"])):
                             bk = books.get(tok) or {}
-                            live = [(p, s) for p, s in bk.items() if s > 0]
-                            row[side] = sorted(live)[:6]
+                            row[side] = sorted(
+                                (p, s) for p, s in bk.items() if s > 0)[:6]
+                            bd = bids.get(tok) or {}
+                            # bids matter because a BUY of one outcome
+                            # also crosses against the OTHER outcome's
+                            # bids by minting a complete set: executable
+                            # ask = min(own ask, 1 - other side's bid).
+                            # Recording only asks made the favourite look
+                            # unbuyable when it was merely unbuyable in
+                            # its own book.
+                            row[side + "_bid"] = sorted(
+                                ((p, s) for p, s in bd.items() if s > 0),
+                                reverse=True)[:6]
                         fh.write(json.dumps(row) + "\n")
                         n_rows += 1
                     fh.flush()

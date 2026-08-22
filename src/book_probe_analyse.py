@@ -47,6 +47,24 @@ def best(levels):
     return p, s
 
 
+def executable(row, side):
+    """The ladder a BUY of `side` can actually cross, in `side` prices.
+
+    Mirrors bot/state.py::best_ask_dn / depth: the CLOB fills a BUY
+    against that outcome's own asks, OR against the OTHER outcome's bids
+    by minting a complete set (two buys whose prices sum >= 1). Both are
+    real resting orders, so the ladders merge. Scoring only a token's own
+    asks makes the favourite look unbuyable whenever nobody happens to be
+    offering it -- which is most of the endgame, and was the artifact
+    that produced a fake 50% "empty book" rate.
+    """
+    other = "Down" if side == "Up" else "Up"
+    lad = [(p, s) for p, s in (row.get(side) or [])]
+    for p, s in (row.get(other + "_bid") or []):
+        lad.append((round(1.0 - p, 4), s))
+    return sorted(lad)
+
+
 def depth_at_or_below(levels, limit):
     return sum(s for p, s in (levels or []) if p <= limit + 1e-9)
 
@@ -100,8 +118,8 @@ def main():
             rb = next((r for r in rembuckets
                        if r[0] <= cur["rem"] < r[1]), None)
             for side in ("Up", "Down"):
-                lv_now = cur.get(side) or []
-                lv_next = nxt.get(side) or []
+                lv_now = executable(cur, side)
+                lv_next = executable(nxt, side)
                 empty_side[0] += 1
                 if not lv_now:
                     empty_side[1] += 1
@@ -124,7 +142,7 @@ def main():
                         rs[0] += 1
                         rs[1] += hit
 
-    print(f"\nside-snapshots with a COMPLETELY EMPTY ask book: "
+    print(f"\nside-snapshots with NO executable liquidity (own asks AND mirror): "
           f"{empty_side[1]}/{empty_side[0]} "
           f"({100 * empty_side[1] / max(1, empty_side[0]):.0f}%) "
           f"-- no limit of any size can lift an empty book")
