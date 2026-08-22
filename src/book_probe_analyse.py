@@ -60,6 +60,8 @@ def main():
                     help="the live gate trades rem in (2, 30]")
     ap.add_argument("--need", type=float, default=5.0,
                     help="shares required to count as a fill (venue min)")
+    ap.add_argument("--rtt", type=float, default=0.4,
+                    help="seconds from decision to our order landing")
     a = ap.parse_args()
     pads = [float(x) for x in a.pads.split(",")]
     rows = load(a.books)
@@ -79,11 +81,24 @@ def main():
     stat = {p: defaultdict(lambda: [0, 0]) for p in pads}   # band->[att,fill]
     empty_side = [0, 0]                                     # [checks, empty]
 
+    rembuckets = [(2, 5), (5, 10), (10, 20), (20, 30)]
+    byrem = {p: defaultdict(lambda: [0, 0]) for p in pads}
     for slug, snaps in by_slug.items():
         for i in range(len(snaps) - 1):
-            cur, nxt = snaps[i], snaps[i + 1]
+            cur = snaps[i]
+            # the snapshot at our ACTUAL round trip, not merely the next
+            # one: sampling cadence must not decide what we measure
+            nxt = None
+            for j in range(i + 1, len(snaps)):
+                if cur["rem"] - snaps[j]["rem"] >= a.rtt:
+                    nxt = snaps[j]
+                    break
+            if nxt is None:
+                continue
             if not (a.min_rem <= cur["rem"] <= a.max_rem):
                 continue
+            rb = next((r for r in rembuckets
+                       if r[0] <= cur["rem"] < r[1]), None)
             for side in ("Up", "Down"):
                 lv_now = cur.get(side) or []
                 lv_next = nxt.get(side) or []
@@ -100,10 +115,14 @@ def main():
                 for pad in pads:
                     limit = min(A + pad, 0.99)
                     got = depth_at_or_below(lv_next, limit)
+                    hit = got >= a.need
                     st = stat[pad][band]
                     st[0] += 1
-                    if got >= a.need:
-                        st[1] += 1
+                    st[1] += hit
+                    if rb:
+                        rs = byrem[pad][rb]
+                        rs[0] += 1
+                        rs[1] += hit
 
     print(f"\nside-snapshots with a COMPLETELY EMPTY ask book: "
           f"{empty_side[1]}/{empty_side[0]} "
@@ -123,6 +142,18 @@ def main():
             att, fil = stat[p][band]
             cells += f"   {100 * fil / att:>5.0f}%" if att else "       -"
         print(f"  {band[0]:.2f}-{band[1]:.2f} {n:>6}{cells}")
+    print("\n  by time-to-expiry (uniform rates => not conditioning on the "
+          "strategy's exact firing second is harmless)")
+    print("  rem       n  " + "".join(f"  pad{100 * p:>2.0f}c" for p in pads))
+    for rb in rembuckets:
+        n = byrem[pads[0]][rb][0]
+        if not n:
+            continue
+        cells = ""
+        for p in pads:
+            att, fil = byrem[p][rb]
+            cells += f"   {100 * fil / att:>5.0f}%" if att else "       -"
+        print(f"  {rb[0]:>2}-{rb[1]:<3}{n:>7}{cells}")
     tot = {p: [sum(v[0] for v in stat[p].values()),
                sum(v[1] for v in stat[p].values())] for p in pads}
     cells = "".join(f"   {100 * tot[p][1] / tot[p][0]:>5.0f}%"

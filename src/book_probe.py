@@ -34,6 +34,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 GAMMA = "https://gamma-api.polymarket.com/markets"
 WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 TAIL_S = 90.0            # record this much of each market's endgame
+SAMPLE_S = 0.25          # our order lands ~400ms out and the venue's
+                         # taker hold is 250ms: sampling once a second
+                         # asks a question 600ms staler than reality,
+                         # and that gap IS what padding addresses
 
 
 def http_get(url):
@@ -97,6 +101,7 @@ async def run(minutes, out_path):
             tok2mkt[m["up"]] = (m, "Up")
             tok2mkt[m["dn"]] = (m, "Down")
         books = {}
+        recon = [0, 0]     # [checks, best-ask mismatches]
         t_stop = min(max(m["t1"] for m in mkts) + 5, deadline)
         next_sample = time.time()
         try:
@@ -119,9 +124,27 @@ async def run(minutes, out_path):
                                     continue
                                 et = ev.get("event_type")
                                 if et == "book":
-                                    books[tok] = {
+                                    truth = {
                                         float(x["price"]): float(x["size"])
                                         for x in (ev.get("asks") or [])}
+                                    # A reconstructed book that silently
+                                    # drifts from the venue's would make
+                                    # every fill number fiction. Each full
+                                    # snapshot is a free audit of the
+                                    # delta folding: compare best ask
+                                    # before overwriting.
+                                    old = books.get(tok)
+                                    if old:
+                                        a_old = min((p for p, sz in
+                                                     old.items() if sz > 0),
+                                                    default=None)
+                                        a_new = min((p for p, sz in
+                                                     truth.items() if sz > 0),
+                                                    default=None)
+                                        recon[0] += 1
+                                        if a_old != a_new:
+                                            recon[1] += 1
+                                    books[tok] = truth
                                 elif et == "price_change":
                                     cur = books.setdefault(tok, {})
                                     for ch in ev.get("changes") or []:
@@ -141,7 +164,7 @@ async def run(minutes, out_path):
                     now = time.time()
                     if now < next_sample:
                         continue
-                    next_sample = now + 1.0
+                    next_sample = now + SAMPLE_S
                     for m in mkts:
                         rem = m["t1"] - now
                         if not (0 < rem <= TAIL_S):
@@ -163,7 +186,8 @@ async def run(minutes, out_path):
             if time.time() > m["t1"]:
                 seen_done.add(m["slug"])
         print(f"{time.strftime('%H:%M:%S')} markets done={len(seen_done)} "
-              f"rows={n_rows}", flush=True)
+              f"rows={n_rows} recon_checks={recon[0]} mismatch={recon[1]}",
+              flush=True)
     fh.close()
 
 
