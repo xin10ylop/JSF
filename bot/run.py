@@ -1422,21 +1422,37 @@ class Bot:
                                "age_s": round((now - src_us) / 1e6, 2)
                                if src_us else None})
             return
-        ev = sig.get("ev_est")
-        if ev is not None and ev < -0.10:
-            # Log once, then block re-evaluation briefly: every book
-            # tick re-fires the same conclusion (observed: 10 identical
-            # blocked_divergence lines in ~100ms).
-            if now >= self._refire_block.get((m.slug, sig["side"]), 0):
-                self.log_decision({"kind": "blocked_divergence",
-                                   "slug": m.slug, "side": sig["side"],
-                                   "ev_est": round(ev, 4),
-                                   "px": sig["px"]})
-            # (Model and market disagreeing by >10c/share is not a
-            # signal, it is two inputs out of sync -- stale oracle or
-            # stale book; the 0.99-vs-0.022 trade carried ev_est -0.196.)
-            self._refire_block[(m.slug, sig["side"])] = now + 3_000_000
-            return
+        # DESYNC guard. It exists for one failure: our book view frozen
+        # while the venue moved (launch day -- Down stuck at 0.99 while
+        # the venue traded 0.022). Test that directly, against the
+        # venue's own last print, instead of against the model.
+        #
+        # Using model disagreement was wrong and silently halved the
+        # strategy. bot/calib.py's table is ASYMMETRIC -- p_up spans
+        # [0.1833, 0.9159] -- so a Down contract can never be valued
+        # above 1-0.1833 = 0.8167 however certain it is. Buying Down at
+        # 0.99 therefore scores ev -0.174 and tripped a -0.10 threshold
+        # every time, while the identical Up trade scored -0.075 and
+        # passed. Measured live: 10 blocked_divergence events, all Down,
+        # all at 0.97-0.99 -- every Down favourite in the endgame,
+        # blocked before it reached the venue, while paper (which has no
+        # such guard) happily traded them. That gap was mine, not the
+        # market's.
+        lt_px, lt_us = m.last_trade_px, m.last_trade_us
+        if lt_px is not None and lt_us and (now - lt_us) / 1e6 <= 30.0:
+            ref = lt_px if sig["side"] == "Up" else 1.0 - lt_px
+            gap = abs(sig["px"] - ref)
+            if gap > self.cfg.get("desync_gap", 0.15):
+                if now >= self._refire_block.get((m.slug, sig["side"]), 0):
+                    self.log_decision({"kind": "blocked_desync",
+                                       "slug": m.slug, "side": sig["side"],
+                                       "px": sig["px"],
+                                       "last_trade": round(ref, 4),
+                                       "gap": round(gap, 4),
+                                       "trade_age_s": round(
+                                           (now - lt_us) / 1e6, 1)})
+                self._refire_block[(m.slug, sig["side"])] = now + 3_000_000
+                return
         # already computed at sizing time so the dollar cap binds on it
         lim = sig.get("limit_px") or self._pad_limit(sig["px"],
                                                      sig.get("fair"))
