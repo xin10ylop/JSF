@@ -153,6 +153,18 @@ class RollAvgEdge:
         self.zmin = cfg.get("zmin", 2.0)
         self.edge_min = cfg.get("edge_min", 0.02)
         self.size = cfg.get("size", 100)
+        # Band-split sizing, 2026-08-22. The two profitable bands have
+        # OPPOSITE capacity profiles and one share count cannot fit both:
+        #   >=locked_px  99% win rate, +1.8c/sh (t=5.1 on 8d print-proof),
+        #                and 10k+ shares RESTING per tick (book probe
+        #                median 33,767 executable) -- capacity is deep
+        #                because we lift resting asks, prints understate it
+        #   < locked_px  +9c/sh lottery band, 23% hit BY DESIGN, but thin:
+        #                traded prints p50 ~20 shares -- size here is
+        #                bounded by the per-band dollar cap in risk.py
+        # size_locked scales the deep band without inflating the thin one.
+        self.size_locked = cfg.get("size_locked", self.size)
+        self.locked_px = cfg.get("locked_px", 0.90)
         self.max_price = cfg.get("max_price", 0.97)
         # Floor on the price we will pay. Default 0.0 = off, unchanged.
         # Live, fills below 0.70 are 9% of shares and 61% of P&L at hit
@@ -303,7 +315,9 @@ class RollAvgEdge:
             self.last_fire[m.slug] = t_us
             self.last_book[(m.slug, "Up")] = stamp_up
             return {"action": "taker_buy", "side": "Up", "px": ba,
-                    "avail": bas, "size": self.size,
+                    "avail": bas,
+                    "size": self.size_locked if ba >= self.locked_px
+                    else self.size,
                     "fair": round(fv, 4),
                     "ev_est": round(ev_of(fv, ba), 4),
                     "z": round(z, 2),
@@ -320,7 +334,9 @@ class RollAvgEdge:
             self.last_fire[m.slug] = t_us
             self.last_book[(m.slug, "Down")] = stamp_dn
             return {"action": "taker_buy", "side": "Down", "px": ask_dn,
-                    "avail": dn_sz, "size": self.size,
+                    "avail": dn_sz,
+                    "size": self.size_locked if ask_dn >= self.locked_px
+                    else self.size,
                     "fair": round(1 - fv, 4),
                     "ev_est": round(ev_of(1 - fv, ask_dn), 4),
                     "z": round(z, 2), "dn_src": dn_src, "oracle_age_s": oa,

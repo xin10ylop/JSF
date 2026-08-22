@@ -52,6 +52,17 @@ class Risk:
     def __init__(self, cfg):
         self.max_market_shares = cfg.get("max_market_shares", 200)
         self.max_market_dollars = cfg.get("max_market_dollars", 150.0)
+        # Separate dollar cap for CHEAP entries (px < cheap_px). The two
+        # profitable bands need different sizes, and the global cap is
+        # sized for the deep >=0.90 band -- but re-fires accumulate cost
+        # until the cap binds (a $12 cap became a single -$12.70 loss at
+        # 17c), so without its own bound the cheap lottery band would
+        # quietly stack to the BIG cap: a 23%-hit-rate bet at locked-band
+        # size. Defaults to the global cap, i.e. no behavior change
+        # unless configured.
+        self.max_market_dollars_cheap = cfg.get(
+            "max_market_dollars_cheap", self.max_market_dollars)
+        self.cheap_px = cfg.get("cheap_px", 0.90)
         self.max_concurrent = cfg.get("max_concurrent_markets", 4)
         self.daily_loss_limit = cfg.get("daily_loss_limit", 400.0)
         # stale_binance_s was dead config: loaded here, enforced nowhere
@@ -234,7 +245,13 @@ class Risk:
         if n_markets_with_pos >= self.max_concurrent and current_shares == 0:
             return 0.0
         room_sh = self.max_market_shares - current_shares
-        room_usd = self.max_market_dollars - current_dollars
+        cap = self.max_market_dollars_cheap \
+            if add_px < self.cheap_px else self.max_market_dollars
+        # current_dollars is the market's TOTAL cost regardless of band;
+        # a cheap entry therefore also counts locked spend against its
+        # smaller cap. Within one 30s window that mix is rare, and the
+        # error direction is refusal, not excess.
+        room_usd = cap - current_dollars
         if room_sh <= 0 or room_usd <= 0:
             return 0.0
         return max(0.0, min(add_shares, room_sh, room_usd / max(add_px, 0.01)))
