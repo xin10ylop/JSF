@@ -511,3 +511,106 @@ class EarlyBird:
                 "reason": f"earlybird z={z:+.2f} fair_{side[0]} "
                           f"{fair_side:.3f} vs ask {ask:.3f} "
                           f"open+{elapsed:.0f}s"}
+
+
+class JumpScalp:
+    """Trade the OPENING JUMP, never the outcome.
+
+    Buy near 0.50 in the first seconds of a 5m market and leave inside
+    30s -- at a profit target if the price gets there, otherwise flat.
+    Settlement is never carried, so the payoff asymmetry that makes a
+    0.99 entry need a 99% hit rate cannot apply: entry near 0.53 wins
+    ~47c and loses ~53c.
+
+    Why an edge can exist here. At open the strike is ALREADY FIXED (it
+    is the mean over the 30s BEFORE t0), so distance-to-strike is known
+    and bounds how far the price can travel: near the strike small spot
+    ticks swing the probability hard, far away the price is pinned.
+    Measured on 2,263 btc markets: the price ranges ~22c in the first
+    30s, and that range grows with |z| (21.7c at |z|<0.15 -> 27.4c at
+    |z|>0.6). Direction comes from 10s spot momentum -- the venue's
+    price lags spot by seconds. 30s and 60s momentum both scored
+    NEGATIVE, which is what a genuinely short-horizon effect looks like
+    rather than a fitted one.
+
+    Out-of-sample (5 days the parameters never saw, btc):
+        taker exit  +2.07c/sh  t=4.37  6/6 days positive
+        maker exit  +2.82c/sh  t=5.75  6/6 days positive
+        survives dropping the 20 best trades; bootstrap P(EV<=0)=0.0000
+    In-sample on the tuning window was WEAKER (+1.00c taker), i.e. the
+    rule did not degrade out of sample.
+
+    Not established: eth (+0.71c) and sol (-0.06c) show nothing
+    out-of-sample. Either this is a btc-specific property -- deepest
+    book, tightest oracle tracking -- or a warning. btc only until that
+    is understood.
+
+    The gate below is the pre-committed rule, frozen before the holdout
+    was scored. Exit logic lives in the runner, which owns positions.
+    """
+
+    def __init__(self, cfg):
+        self.zmin = cfg.get("zmin", 0.15)
+        self.mom_s = cfg.get("mom_s", 10)
+        self.size = cfg.get("size", 8)
+        self.open_window_s = cfg.get("open_window_s", 5.0)
+        self.min_price = cfg.get("min_price", 0.30)
+        self.max_price = cfg.get("max_price", 0.70)
+        self.target = cfg.get("target", 0.09)
+        self.exit_s = cfg.get("exit_s", 30.0)
+        self.fired = set()
+        self.f = {"eval": 0, "in_window": 0, "priced": 0, "z_pass": 0,
+                  "mom": 0, "book": 0, "px_pass": 0, "fired": 0}
+
+    def evaluate(self, state, m, t_us):
+        self.f["eval"] += 1
+        if m.t1_us - m.t0_us != 300_000_000:
+            return None                       # 5m only
+        since = (t_us - m.t0_us) / 1e6
+        if not (0 <= since <= self.open_window_s):
+            return None
+        self.f["in_window"] += 1
+        if m.slug in self.fired:
+            return None                       # one entry per market
+        z = state.zscore(m, t_us)             # pre-window branch at open
+        if z is None:
+            return None
+        self.f["priced"] += 1
+        if abs(z) < self.zmin:
+            return None
+        self.f["z_pass"] += 1
+        # side from short-horizon spot momentum: the venue lags spot
+        now_s = t_us / 1e6
+        spot = state.spot_adj()
+        back = None
+        for ts, px in reversed(state.oracle_hist):
+            if now_s - ts >= self.mom_s:
+                back = px
+                break
+        if spot is None or back is None or spot == back:
+            return None
+        self.f["mom"] += 1
+        side = "Up" if spot > back else "Down"
+        if side == "Up":
+            ask, _sz = m.best_ask()
+        else:
+            ask, _sz, _src = m.best_ask_dn()
+        if ask is None or not (0 < ask < 1):
+            return None
+        self.f["book"] += 1
+        if not (self.min_price <= ask <= self.max_price):
+            return None
+        self.f["px_pass"] += 1
+        self.fired.add(m.slug)
+        self.f["fired"] += 1
+        return {"action": "taker_buy", "side": side, "px": ask,
+                "size": self.size, "one_shot": True,
+                "scalp": {"target": round(ask + self.target, 4),
+                          "deadline_us": int(m.t0_us
+                                             + self.exit_s * 1e6)},
+                "z": round(z, 3), "mom": round(spot - back, 2),
+                "oracle_age_s": state.oracle_age_s(),
+                "reason": (f"jumpscalp z={z:+.2f} mom{self.mom_s}s="
+                           f"{spot-back:+.1f} buy {side} @{ask:.3f} "
+                           f"-> {ask+self.target:.3f} or t+"
+                           f"{self.exit_s:.0f}s")}

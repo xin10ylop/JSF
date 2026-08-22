@@ -91,5 +91,20 @@
  "taker_pad_rel": 0.25,
  "_probe_note": "Probe config: identical gate and padding to config.live.json, sized so an hour of real orders answers the fill question for a few dollars. Graduate to config.live.json sizing only after the measured kill:fill ratio beats 5:1.",
  "desync_gap": 0.15,
- "_desync_note": "Blocks a signal whose price disagrees with the venue's OWN last print by more than this. Replaces a model-disagreement check that silently halved the strategy: calib.py's p_up spans [0.1833, 0.9159], so a Down contract can never be valued above 0.8167 and every Down favourite at 0.97-0.99 scored ev -0.17 and was blocked, while the identical Up trade at -0.075 passed. Measured live: 10 blocks, all Down. The guard's real job is a frozen book view (launch day: ours stuck at 0.99 while the venue traded 0.022), which a print comparison catches directly."
+ "_desync_note": "Blocks a signal whose price disagrees with the venue's OWN last print by more than this. Replaces a model-disagreement check that silently halved the strategy: calib.py's p_up spans [0.1833, 0.9159], so a Down contract can never be valued above 0.8167 and every Down favourite at 0.97-0.99 scored ev -0.17 and was blocked, while the identical Up trade at -0.075 passed. Measured live: 10 blocks, all Down. The guard's real job is a frozen book view (launch day: ours stuck at 0.99 while the venue traded 0.022), which a print comparison catches directly.",
+ "jumpscalp": {
+  "enabled": false,
+  "coins": [
+   "btc"
+  ],
+  "zmin": 0.15,
+  "mom_s": 10,
+  "size": 8,
+  "open_window_s": 5.0,
+  "min_price": 0.3,
+  "max_price": 0.7,
+  "target": 0.09,
+  "exit_s": 30.0,
+  "_note": "Trade the opening jump, never the outcome: buy near 0.50 in the first seconds, leave inside 30s at +9c or flat. Out-of-sample btc (5 days the parameters never saw): taker exit +2.07c/sh t=4.37, maker +2.82c/sh t=5.75, 6/6 days positive, survives dropping the 20 best trades, bootstrap P(EV<=0)=0.0000. In-sample was WEAKER (+1.00c taker), so the rule did not degrade out of sample. Exits are marketable FAK limits, never resting orders -- the +2.07c figure assumes no queue position, and a rested sell is what made ZMaker lose 22.8c/sh. NOT ESTABLISHED: eth (+0.71c) and sol (-0.06c) show nothing out-of-sample; btc only until that is understood. Scaling: entry depth p10 is 54sh so past ~250sh the book gets walked and ~1c of slippage takes half a 2c edge -- confident zone is 50-100sh."
+ }
 }

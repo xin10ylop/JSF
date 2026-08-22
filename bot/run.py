@@ -36,7 +36,8 @@ from bot.state import BotState, MarketState, now_us  # noqa: E402
 from bot.paper import PaperBroker  # noqa: E402
 from bot.risk import Risk  # noqa: E402
 from bot.strategy import (GzValueMaker, ExtremeTaker, VacuumLadder,  # noqa: E402
-                          RollAvgEdge, ZMaker, EarlyBird)
+                          RollAvgEdge, ZMaker, EarlyBird,
+                          JumpScalp)
 
 GAMMA = "https://gamma-api.polymarket.com/markets"
 CFG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -117,6 +118,11 @@ class Bot:
         self.maker_broker = None
         if cfg.get("zmaker", {}).get("enabled", False):
             self.strategies.append(ZMaker(cfg.get("zmaker", {})))
+        js = cfg.get("jumpscalp", {})
+        if js.get("enabled", False) and self.coin in js.get("coins", ["btc"]):
+            # btc only until the eth/sol out-of-sample blank is explained
+            self.strategies.append(JumpScalp(js))
+            self._scalps = {}      # (slug, side) -> open scalp position
             self.maker_broker = PaperBroker(
                 log_path=os.path.join(self.logdir, "maker_fills.jsonl"))
         self.decisions = open(
@@ -1567,6 +1573,19 @@ class Bot:
                 loop.run_in_executor(None, self._fill_truth,
                                      r.get("order_id"), o["slug"],
                                      o["side"], token, px, filled)
+                sc = (o.get("meta") or {}).get("scalp")
+                if sc is not None and hasattr(self, "_scalps"):
+                    # A scalp that is not exited becomes exactly the
+                    # held-to-expiry bet this strategy exists to avoid,
+                    # so the position is registered the moment it fills.
+                    k = (o["slug"], o["side"])
+                    prev = self._scalps.get(k)
+                    self._scalps[k] = {
+                        "slug": o["slug"], "side": o["side"],
+                        "token": token, "entry": px,
+                        "shares": filled + (prev["shares"] if prev else 0.0),
+                        "target": sc["target"],
+                        "deadline_us": sc["deadline_us"], "tries": 0}
         elif st == "killed":
             self.n_miss += 1
             self.n_miss_why["live_killed"] = \
@@ -1814,6 +1833,81 @@ class Bot:
         if len(self._prewarmed) > 64:
             self._prewarmed &= set(self.state.markets)
 
+    async def scalp_exit_loop(self):
+        """Close every scalp: at the target, or flat at the deadline.
+
+        The strategy's whole risk claim is that it never carries a
+        binary to settlement. That claim is false unless something
+        actually sells, so this loop is the strategy -- an entry with a
+        broken exit is a held-to-expiry bet at a coin-flip price.
+
+        Exits are marketable FAK limits (a floor price that crosses
+        resting bids immediately), never resting orders: a rested sell
+        depends on queue position, which is unverified here and is what
+        made ZMaker lose 22.8c/share. Measured with taker exits the
+        edge is +2.07c/sh out-of-sample, so nothing rests.
+        """
+        while True:
+            await asyncio.sleep(0.5)
+            if not getattr(self, "_scalps", None):
+                continue
+            now = now_us()
+            for k in list(self._scalps):
+                p = self._scalps.get(k)
+                if p is None or p["shares"] < 5.0:
+                    self._scalps.pop(k, None)
+                    continue
+                m = self.state.markets.get(p["slug"])
+                bid = None
+                if m is not None:
+                    if p["side"] == "Up":
+                        bid, _ = m.best_bid()
+                    else:
+                        ba, _bs = m.best_ask()
+                        bid = (1.0 - ba) if (ba and 0 < ba < 1) else None
+                due = now >= p["deadline_us"]
+                hit = bid is not None and bid >= p["target"]
+                if not (due or hit):
+                    continue
+                # floor: at the target take it; at the deadline accept
+                # whatever the book pays rather than carry the binary
+                floor = p["target"] if hit else max(0.01, (bid or 0.01)
+                                                    - 0.02)
+                p["tries"] += 1
+                r = await asyncio.get_running_loop().run_in_executor(
+                    self._order_pool,
+                    lambda pp=p, fl=floor: self.executor.submit_taker_sell(
+                        pp["token"], pp["shares"], fl, slug=pp["slug"],
+                        outcome=pp["side"]))
+                st = r.get("status")
+                if st in ("filled", "partial"):
+                    got = float(r.get("filled") or 0.0)
+                    px = r.get("avg_px") or floor
+                    self.broker.taker_sell(p["slug"], p["side"], px, got) \
+                        if hasattr(self.broker, "taker_sell") else None
+                    self.log_decision({
+                        "kind": "scalp_exit", "slug": p["slug"],
+                        "side": p["side"], "entry": round(p["entry"], 4),
+                        "exit": px, "shares": got,
+                        "pnl_c": round(100 * (px - p["entry"]), 2),
+                        "why": "target" if hit else "deadline"})
+                    p["shares"] -= got
+                    if p["shares"] < 5.0:
+                        self._scalps.pop(k, None)
+                elif st == "shadow":
+                    self._scalps.pop(k, None)
+                else:
+                    # Unsold and past the deadline is the failure mode
+                    # that turns a scalp into a settlement bet. Say so
+                    # loudly on every retry rather than once.
+                    self.log_decision({
+                        "kind": "scalp_exit_failed", "slug": p["slug"],
+                        "side": p["side"], "shares": p["shares"],
+                        "floor": round(floor, 4), "tries": p["tries"],
+                        "status": st, "detail": (r.get("detail") or "")[:120]})
+                    if p["tries"] >= 20:
+                        self._scalps.pop(k, None)
+
     async def live_ops_loop(self):
         """Live-mode housekeeping every 5 minutes: redeem resolved
         winnings back into pUSD and log the spendable balance.
@@ -2052,6 +2146,8 @@ class Bot:
                  self.settle_loop()]
         if self.mode == "live":
             tasks.append(self.live_ops_loop())
+            if getattr(self, '_scalps', None) is not None:
+                tasks.append(self.scalp_exit_loop())
             tasks.append(self.live_keepalive_loop())
         await asyncio.gather(*tasks)
 
