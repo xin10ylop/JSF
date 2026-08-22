@@ -44,13 +44,32 @@ else
 fi
 cd "$DIR"
 
-echo "==> installing the LIVE dependency set only"
-# numpy: bot/state.py. websockets: the two feeds. polymarket-client: the
-# signing + order path. pandas/scipy/sklearn are research-only (prune,
-# and a lazily-imported pricer the live gate never calls).
-pip3 install --break-system-packages -q \
-  numpy websockets 'polymarket-client>=0.6' python-dotenv 2>/dev/null || \
-  pip3 install -q numpy websockets 'polymarket-client>=0.6' python-dotenv
+echo "==> installing the LIVE dependency set into a venv"
+# A VENV, not --break-system-packages: on Ubuntu 24.04 pip refuses to
+# uninstall Debian-managed typing_extensions ("RECORD file not found")
+# and rolls the WHOLE transaction back, so numpy and everything else
+# silently never install. The failure surfaces later as a
+# ModuleNotFoundError at bot start.
+#
+# The list is derived from the bot's actual imports, not from memory:
+#   numpy      bot/state.py            websockets  the two feeds
+#   aiohttp    bot/run.py              requests    sigma seeding at start
+#   dotenv     credentials             polymarket-client  signing + orders
+# pandas is prune.py only (research); scipy/sklearn are never imported
+# on the trading path.
+if command -v apt-get >/dev/null; then
+  apt-get install -y python3-venv >/dev/null 2>&1 || true
+fi
+PY="$DIR/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  python3 -m venv "$DIR/.venv"
+fi
+"$DIR/.venv/bin/pip" install -q -U pip
+"$DIR/.venv/bin/pip" install -q numpy websockets aiohttp requests \
+  python-dotenv 'polymarket-client>=0.6'
+"$PY" -c "import numpy, websockets, aiohttp, requests, dotenv, polymarket" \
+  || { echo "FATAL: dependency install failed"; exit 1; }
+echo "    deps OK"
 
 echo "==> credentials"
 if [ -n "$POLYMARKET_PRIVATE_KEY" ]; then
@@ -83,7 +102,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$DIR
 EnvironmentFile=$DIR/.env
-ExecStart=/usr/bin/python3 -u -m bot.run --cfg bot/config.live.json --coin %i
+ExecStart=$DIR/.venv/bin/python -u -m bot.run --cfg bot/config.live.json --coin %i
 Restart=always
 RestartSec=5
 StandardOutput=append:$DIR/logs/live/%i/stdout.log
@@ -107,7 +126,7 @@ else
   # the session; it does NOT survive a reboot or a closed lid.
   echo "==> no systemd here; starting under nohup"
   set -a; . ./.env; set +a
-  nohup python3 -u -m bot.run --cfg bot/config.live.json --coin "$COIN" \
+  nohup "$PY" -u -m bot.run --cfg bot/config.live.json --coin "$COIN" \
     >> "logs/live/$COIN/stdout.log" 2>&1 &
   echo "pid $! -- tail -f $DIR/logs/live/$COIN/stdout.log"
   echo "stop:  pkill -f 'bot.run .*--coin $COIN'"
