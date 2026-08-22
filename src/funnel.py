@@ -20,29 +20,34 @@ import os
 import time
 
 
-def last_health(path):
-    """Newest health line, read from the tail without loading the file."""
-    best = None
+def tail_records(path, kinds, nbytes=4_000_000):
+    """Parsed records of the given kinds from the tail of a jsonl log.
+
+    Kinds are checked on the PARSED field. Matching a raw byte string like
+    '"kind":"health"' would depend on the writer's json separators, and a
+    pattern that only looked right has already cost this project one wrong
+    diagnosis (`eval_err` silently matching `eval_errs`).
+    """
+    out = []
     with open(path, "rb") as fh:
         try:
-            fh.seek(-2_000_000, os.SEEK_END)
+            fh.seek(-nbytes, os.SEEK_END)
             fh.readline()                      # discard the partial line
         except OSError:
             fh.seek(0)
         for raw in fh:
-            # Cheap prefilter, then confirm on the PARSED field. Matching
-            # the exact byte string '"kind":"health"' would depend on the
-            # writer's json separators, and a grep pattern that only looked
-            # right has already cost this project one wrong diagnosis.
-            if b"health" not in raw:
-                continue
             try:
                 d = json.loads(raw)
             except Exception:                  # noqa: BLE001
                 continue
-            if d.get("kind") == "health":
-                best = d
-    return best
+            if d.get("kind") in kinds:
+                out.append(d)
+    return out
+
+
+def med(v):
+    v = sorted(x for x in v if isinstance(x, (int, float)))
+    return v[len(v) // 2] if v else None
 
 
 def nonzero(d):
@@ -57,7 +62,10 @@ def main():
     dec = os.path.join(a.dir, "decisions.jsonl")
     orders = os.path.join(a.dir, "orders.jsonl")
 
-    h = last_health(dec)
+    recs = tail_records(dec, {"health", "live_miss", "taker_miss",
+                              "scalp_exit", "scalp_exit_failed"})
+    heals = [r for r in recs if r.get("kind") == "health"]
+    h = heals[-1] if heals else None
     if h is None:
         print("no health line yet -- the bot has not completed a cycle")
         return
@@ -84,6 +92,32 @@ def main():
     mw = nonzero(h.get("miss_why"))
     print(f"SIGNAL -> ORDER MISSES  {mw or 'none'}")
 
+    # `too_small` is raised by two different code paths -- the live
+    # dispatcher (size under the venue's 5-share orderMinSize) and the
+    # shadow/paper sizer (want under min_order_size after the book, tape
+    # and participation caps). The counter cannot tell them apart, and
+    # they have completely different fixes, so break it out by the `why`
+    # each path logs and show which cap actually bound.
+    misses = [r for r in recs if r.get("kind") in ("live_miss", "taker_miss")]
+    if misses:
+        by = {}
+        for r in misses:
+            by.setdefault((r["kind"], r.get("why", "?")), []).append(r)
+        print("\nMISS DETAIL  (tail of the log, newest window)")
+        for (kind, why), v in sorted(by.items(), key=lambda kv: -len(kv[1])):
+            line = f"  {kind:<11} {why:<18} n={len(v):<5}"
+            if why == "below_min_size":
+                line += (f" want={med([x.get('want') for x in v])}"
+                         f"  cap_book={med([x.get('cap_book') for x in v])}"
+                         f"  cap_tape={med([x.get('cap_tape') for x in v])}"
+                         f"  cap_life={med([x.get('cap_life') for x in v])}")
+            elif why == "below_venue_min":
+                line += f" size={med([x.get('size') for x in v])}"
+            elif why == "book_view_stale":
+                line += f" age_s={med([x.get('age_s') for x in v])}"
+            print(line)
+        print("   the smallest cap is the binding one")
+
     if not os.path.exists(orders):
         return
     kinds, recent = {}, []
@@ -104,8 +138,8 @@ def main():
               f"{str(d.get('outcome','')):<5} "
               f"sh={d.get('shares','')} px<={d.get('max_price','')} {err}")
 
-    ex = [json.loads(x) for x in open(dec)
-          if '"kind":"scalp_exit' in x]
+    ex = [r for r in recs
+          if r.get("kind") in ("scalp_exit", "scalp_exit_failed")]
     if ex:
         done = [e for e in ex if e.get("kind") == "scalp_exit"]
         fail = [e for e in ex if e.get("kind") == "scalp_exit_failed"]
