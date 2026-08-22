@@ -29,16 +29,16 @@
   "zmin": 2.0,
   "edge_min": 0.02,
   "size": 8,
-  "max_price": 0.99,
+  "max_price": 0.9,
   "min_rem_s": 2.0,
-  "require_edge": false,
+  "require_edge": true,
   "cooldown_s": 0.0,
   "skip_px": null,
   "min_price": 0.0,
   "_size_note": "10 shares (~$9 at typical fill px) against paper's 100. Every GATE is identical to the frozen paper config -- same zmin, same max_price, same window -- so live and paper disagree only about execution, which is the one thing micro-live exists to measure. The venue min is 5 shares; risk room below that is logged as live_miss/below_venue_min, not sent.",
   "_require_edge_note": "ON for LIVE as of 2026-08-20 (paper keeps it OFF as the control). Live measured adverse fill selection the tape cannot show: 171 kills vs 14 fills overnight, with fills averaging px 0.296 vs paper's 0.857 -- the venue fills us eagerly when the quote is going bad and starves us when it's right. require_edge only buys when ask <= empirical_fair - edge_min (2c), the pre-measured +10.15c/sh filter (3x per-share edge on ~1/5 volume): trades that are mispriced in OUR favor, which adverse selection cannot punish. The divergence report A/Bs this against the unfiltered paper baseline.",
   "_relaunch_note": "RE-ENABLED 2026-08-21 with the padded marketable limit. It was retired on 08-20 for adverse fill selection; that turned out to be an EXECUTION defect (unpadded limit + a round() that put the limit UNDER the ask above 0.96), not a defect of the prediction. Print-proof pooled: +5.51c/sh t=3.02, 7/9 days positive, holdout Aug18-21 +4.44c/sh; ~25 trades/day at the current micro caps. Entries skew cheap (avg 0.213) so per-trade variance is high: the daily stop, not the per-trade size, is the real risk control.",
-  "_gate_note": "Gate matched to bot/config.json -- the PAPER configuration whose week produced the ~$1.3k/day line. require_edge=true and max_price=0.97 made the probe a different, narrower strategy than the one being validated: the strategy's own docstring calls the edge filter 'a DIFFERENT STRATEGY' (mostly longshot underpricing, not the settlement change), and the 0.97-0.99 band that max_price excluded is exactly where the book capture shows padding helping most (45% -> 90% fills). Only SIZE differs from paper now: 8 shares vs 100, so an hour of real orders costs a few dollars."
+  "_gate_note": "Gate REVERTED to require_edge after live evidence. Matching paper's gate (require_edge=false, max_price=0.99) put real money into 0.97-0.99 favourites: measured live 2026-08-22, three wins totalling $0.24 (+0.14/+0.05/+0.05) against one loss of $5.22 -- a 75% win rate and a net -$4.98. Buying at 0.99 pays 1c when right and costs 99c when wrong, so it needs a 99% hit rate; nothing in this project measures one. calib.py caps p_up at 0.9159, so the model ITSELF prices those trades at -7c/share and the unfiltered gate takes them anyway. require_edge only buys below modelled fair, which structurally excludes them (model fair can never exceed 0.9159 Up / 0.8167 Down). Tape, 9 days x 3 coins, print-proof: this gate +5.51c/sh t=3.02 at avg entry 0.213 -- win big, lose small, the opposite payoff shape."
  },
  "coin": "btc",
  "coins": [
