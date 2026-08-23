@@ -26,7 +26,7 @@
     "_rung_note": "RUNG 0, sized to the ~$60 balance 2026-08-22: locked 25 sh (~$25/market, two markets can be in flight between buy and redeem, so ~$54 peak against ~$60 cash -- occasional balance rejections just skip a trade). Tape sim: ~$60/day, worst day -$14, 2/9 days negative. Deposit ladder: $250 -> locked 50 / cap 55 / stop 80; $700 -> 150/160/200; $1.8k -> 400/420/500. Advance a rung only after >=100 locked fills realise within 0.5c of tape (src/pnl.py); scale cap and stop with size."
   },
   "rollavg_edge": {
-    "enabled": true,
+    "enabled": false,
     "_disabled_note": "OFF as of 2026-08-20: the endgame taker is retired from live. Micro-live measured its structural problem directly -- adverse fill selection (171 kills vs 14 fills; fills avg px 0.296 vs paper 0.857) -- and the filtered variant traded too rarely to pay for its tail risks. EarlyBird replaces it as the sole real-money strategy: same model, opposite end of the window, where the book is two-sided and the strike is already formed. Retiring it also frees both concurrency slots for consecutive EarlyBird holds and removes the endgame-only failure paths (concurrent unknown resolutions on one token, post-drop orphan fills). The paper bot keeps the unfiltered endgame as the frozen control for live_vs_paper.",
     "window_s": 60,
     "zmin": 1.5,
@@ -71,7 +71,7 @@
   },
   "_fill_note": "Drives the paper simulation inside shadow mode and min_order_size (the venue's orderMinSize) in live mode. The rest is ignored by the live path: reality fills real orders.",
   "zmaker": {
-    "enabled": true,
+    "enabled": false,
     "window_s": 90,
     "zmin": 2.0,
     "margin": 0.03,
@@ -123,5 +123,6 @@
     "_entry_note": "AT the open, t+0..t+3. The pre-open window was chosen on a look-ahead artifact; scored at the decision instant it is +0.00 to +0.66 c/sh (t~1) while t+0..t+3 is +1.21 to +2.19 (t 2.2-4.3) and t+4 falls to +0.24. See src/jumpscalp_preopen.py.",
     "_off_note": "OFF 2026-08-22 at the account owner's instruction after 4 live trades (+2.72 on three winners, -5.11 on one deadline exit, net -2.39). The entry and exit chain is working end to end; this is a decision about variance, not a defect. Re-enable by flipping the flag -- strategy code, tests and measurements are all left in place."
   },
-  "_incident_note": "2026-08-22 20:14 UTC drawdown, -$45.89 on the day. Two causes, both mine: (1) families carried 15m, which NO verification covered -- the 8-day holdout study was --fam 5m only, so 15m markets were trading an unvalidated gate; (2) the 4:00-4:15 15m market and the 4:10-4:15 5m market OVERLAP IN TIME and both bought Up, so one wrong directional call cost -13.03 and -18.41 together while max_concurrent_markets counted them as two independent markets. Restricting to 5m fixes both: consecutive 5m endgame windows never overlap. Sizes cut to fit the REMAINING balance (~$23 after the drawdown, not the ~$60 rung 0 was built for) and the daily stop dropped to 15 to match. Re-raise only after the balance supports it AND src/pnl.py shows the 5m-only config tracking tape."
+  "_incident_note": "2026-08-22 20:14 UTC drawdown, -$45.89 on the day. Two causes, both mine: (1) families carried 15m, which NO verification covered -- the 8-day holdout study was --fam 5m only, so 15m markets were trading an unvalidated gate; (2) the 4:00-4:15 15m market and the 4:10-4:15 5m market OVERLAP IN TIME and both bought Up, so one wrong directional call cost -13.03 and -18.41 together while max_concurrent_markets counted them as two independent markets. Restricting to 5m fixes both: consecutive 5m endgame windows never overlap. Sizes cut to fit the REMAINING balance (~$23 after the drawdown, not the ~$60 rung 0 was built for) and the daily stop dropped to 15 to match. Re-raise only after the balance supports it AND src/pnl.py shows the 5m-only config tracking tape.",
+  "_halt_note": "ALL STRATEGIES OFF 2026-08-23 at the account owner's instruction after the account went to zero: -$62.89 realised over 30h from a ~$69 start. Do not re-enable without (a) a fresh deposit the owner decides on, (b) the full 8-day tape re-verified end to end, and (c) a paper run that reproduces the tape before any real money. The losses were not one bad market -- see the band table in the skip_px note and the incident note above."
 }
