@@ -36,7 +36,10 @@
     "min_rem_s": 2.0,
     "require_edge": false,
     "cooldown_s": 0.0,
-    "skip_px": null,
+    "skip_px": [
+      0.7,
+      0.95
+    ],
     "min_price": 0.0,
     "_size_note": "10 shares (~$9 at typical fill px) against paper's 100. Every GATE is identical to the frozen paper config -- same zmin, same max_price, same window -- so live and paper disagree only about execution, which is the one thing micro-live exists to measure. The venue min is 5 shares; risk room below that is logged as live_miss/below_venue_min, not sent.",
     "_require_edge_note": "ON for LIVE as of 2026-08-20 (paper keeps it OFF as the control). Live measured adverse fill selection the tape cannot show: 171 kills vs 14 fills overnight, with fills averaging px 0.296 vs paper's 0.857 -- the venue fills us eagerly when the quote is going bad and starves us when it's right. require_edge only buys when ask <= empirical_fair - edge_min (2c), the pre-measured +10.15c/sh filter (3x per-share edge on ~1/5 volume): trades that are mispriced in OUR favor, which adverse selection cannot punish. The divergence report A/Bs this against the unfiltered paper baseline.",
@@ -45,7 +48,8 @@
     "_zmin_note": "2.0 -> 1.5 on 2026-08-22 after the 8-day holdout verification (src/endgame_lab.py, 2259 markets, print-proof fills, 40% time holdout): z1.5 HOLDOUT +3.07c/sh (t=2.3, n=246) vs z2.0 +2.25c (t=1.4, n=163) -- ~50% more trades at equal-or-better per-share edge, and 1/9 negative days vs 2/9 in the dollar sim. zmin 2.5/3.0 look better in-sample and FAIL the holdout (-0.12c, -0.93c): the tighter gates were overfit. require_edge also fails holdout (+1.67c t=0.4 vs +9.39c in-sample) and stays off.",
     "size_locked": 10,
     "locked_px": 0.9,
-    "_ladder_note": "SIZE LADDER for the locked band (>=0.90), 2026-08-22. Capacity there is resting depth (book probe median 33,767 executable shares; 10k+ per tick observed), not prints, so it scales -- but edge at size is unproven live, so climb in rungs: 50 -> 150 -> 400, advancing only after >=100 locked fills realise within 0.5c of the tape's +1.8c/share (check with src/pnl.py). Each rung also scales max_market_dollars and daily_loss_limit proportionally. If realised collapses at a rung, the ladder found the real capacity: step back."
+    "_ladder_note": "SIZE LADDER for the locked band (>=0.90), 2026-08-22. Capacity there is resting depth (book probe median 33,767 executable shares; 10k+ per tick observed), not prints, so it scales -- but edge at size is unproven live, so climb in rungs: 50 -> 150 -> 400, advancing only after >=100 locked fills realise within 0.5c of the tape's +1.8c/share (check with src/pnl.py). Each rung also scales max_market_dollars and daily_loss_limit proportionally. If realised collapses at a rung, the ladder found the real capacity: step back.",
+    "_skip_note": "SKIP 0.70-0.95, 2026-08-22, on convergent evidence. b/e (the win rate needed) IS the price paid, so a band is only tradeable when the win rate exceeds it. LIVE (36 settled markets): 0.70-0.88 won 50% needing 83% (-$20.85); 0.88-0.95 won 75% needing 93% (-$17.06) -- together -$37.91 of a -$45.89 day. TAPE (8d print-proof, 1961 mkts): 0.50-0.90 was the ONLY negative cell, -1.94c/sh, win rate exactly equal to break-even. The extremes work for opposite reasons -- >=0.95 is a near-locked outcome the model only has to confirm (100% win vs 98% needed, +$4.81 live), <0.30 pays 5x so a low hit rate still clears its break-even. The middle is a genuinely uncertain outcome at a fair price, where a small informational edge does not cover the 0.07*p*(1-p) fee. Live n is only 8 in the skipped band; re-check on the full tape (src/endgame_verify.py) before treating the exact boundaries as settled."
   },
   "coin": "btc",
   "coins": [
